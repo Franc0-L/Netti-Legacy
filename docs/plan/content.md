@@ -97,8 +97,8 @@ begin
      or new.to_path !~ '^/[^/][^ ]*$'
      or new.from_path like '%//%'
      or new.to_path like '%//%'
-     or new.from_path like '%\\%'
-     or new.to_path like '%\\%'
+     or position(chr(92) in new.from_path) > 0
+     or position(chr(92) in new.to_path) > 0
      or new.from_path like '%?%'
      or new.to_path like '%?%'
      or new.from_path like '%#%'
@@ -582,12 +582,10 @@ Comparar `origin` y no `startsWith` evita que `https://img.netti.example.evil.co
 
 ### 3.1 Esquema de artículo
 
-Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe la URL del almacenamiento y construye `cover` una sola vez. El servidor la llama con `env.IMAGES_PUBLIC_BASE_URL`; el cliente, con el valor que expone el layout. Así no hay ningún `process.env` en código compartido. Los bloques de esta sección se leen como un solo módulo.
+Todo lo que sigue vive dentro de `makeArticleSchema()`, que construye el esquema de validación de entradas del cliente. No recibe parámetros: las URLs de imágenes se resuelven en el servidor desde `media`, no se reciben desde el cliente. Los bloques de esta sección se leen como un solo módulo.
 
 ```ts
-export const makeArticleSchema = (imagesBaseUrl: string) => {
-  const cover = imageUrlSchema(imagesBaseUrl);
-
+export const makeArticleSchema = () => {
   // Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
   const baseArticle = z.object({
     slug: z

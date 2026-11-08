@@ -186,7 +186,7 @@ curl -fsS -X POST "$SITE/api/revalidate" -H "Authorization: Bearer $CRON_SECRET"
 
 GitHub Actions es gratis, estable y no depende de un producto beta. Si Schedules sale de beta con condiciones aceptables, se migra sin tocar código: el endpoint es el mismo.
 
-El endpoint debe ser **idempotente**: revalida lo que ya cruzó `published_at` y no hace nada si no hay pendientes. Registra `last_run_at` y `last_activated_at` para que el panel y el monitor puedan distinguir "no había nada" de "el job dejó de correr". Si el job falla, el artículo aparece en la siguiente ejecución: retraso acotado, no fuga de contenido.
+El endpoint debe ser **idempotente**: revalida lo que ya cruzó `published_at` y no hace nada si no hay pendientes. Registra `last_run_at` y `last_success_at` para que el panel y el monitor puedan distinguir "no había nada" de "el job dejó de correr". Si el job falla, el artículo aparece en la siguiente ejecución: retraso acotado, no fuga de contenido.
 
 ### 2.7 Despliegue
 

@@ -147,12 +147,26 @@ Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $vers
 | Versión desactualizada | `conflict` | `current` con el estado actual |
 | Slug ocupado | `conflict` | `fieldErrors.slug` |
 
-**Cambio de slug**: si `input.slug` difiere del slug actual, dentro de la misma transacción se inserta una redirección:
+**Cambio de slug**: si `input.slug` difiere del slug actual, dentro de la misma transacción se inserta una redirección. Las rutas públicas usan prefijos por colección:
+
+```ts
+const ARTICLE_ROUTE_PREFIX = {
+  review: "resenas",
+  news: "noticias",
+  guide: "guias",
+} as const;
+
+export function articlePath(kind: ArticleKind, slug: string): string {
+  return `/${ARTICLE_ROUTE_PREFIX[kind]}/${slug}`;
+}
+```
+
+La transacción obtiene el slug anterior y el `kind` dentro de la misma operación (`SELECT ... FOR UPDATE` para evitar lecturas en falso), y luego inserta la redirección:
 
 ```ts
 await tx.insert(redirects).values({
-  from_path: `/${kind}/${oldSlug}`,
-  to_path: `/${kind}/${input.slug}`,
+  from_path: articlePath(kind, oldSlug),
+  to_path: articlePath(kind, input.slug),
   status_code: 308,
 });
 ```
