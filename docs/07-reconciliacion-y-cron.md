@@ -49,8 +49,13 @@ Los documentos dicen que un job compara `media.storage_key` con el store y repor
 
 ## 4. Cursor del cron (`POST /api/revalidate`)
 
+**Mitigación de CU-horas**: cada ejecución despierta Neon. Para evitar 48 despertares al día (~30 CU-h/mes solo en cómputo de arranque), el endpoint primero consulta un almacén barato (Edge Config de Vercel o un JSON en Blob) que guarde el próximo `published_at` pendiente. Si ese almacén dice que no hay nada por activar antes de `t0`, el endpoint retorna sin tocar Postgres. Solo cuando el almacén barato indica una fecha próxima, se consulta Neon.
+
 ```
 0. Bearer con timingSafeEqual → 401
+0.5. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
+     si next_due es null o next_due > t0 → retornar { revalidated: 0, cursor: t0 }
+     (no hay nada que activar aún; no se toca Postgres)
 1. t0  = select now()                          -- reloj de la base
 2. cur = cron_runs.last_success_at ?? t0 - 24 h -- primera ejecución: ventana conservadora
 3. update cron_runs set last_run_at = t0
@@ -59,7 +64,8 @@ Los documentos dicen que un job compara `media.storage_key` con el store y repor
 5. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
 6. cursor = (due.length == 200) ? published_at de la última : t0
 7. update cron_runs set last_success_at = cursor   -- solo acá, nunca antes
-8. return { revalidated, cursor }
+8. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
+9. return { revalidated, cursor }
 ```
 
 No hace falta lock: dos ejecuciones solapadas revalidan dos veces y es idempotente. No uses `pg_try_advisory_lock` de sesión: el pooler de Neon (modo transacción) lo rompe; solo `xact` es seguro.

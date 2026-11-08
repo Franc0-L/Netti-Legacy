@@ -63,8 +63,9 @@ Cada afirmación de infraestructura lleva su grado de certeza. Sin esto, una hip
 |---|----------|--------|-------------------------|
 | 1 | **Vercel Blob + subida por servidor.** `lib/storage.ts` aísla `put`/`del` para poder migrar si algún día se justifica. | Decidida | Subida real de 2 MB, cuatro objetos, compensación si falla `INSERT` en media. |
 | 2 | **`scrypt` con N=2^17 en Vercel.** Consume ~128 MiB por verificación. Si el spike muestra problemas de memoria o latencia, se baja N con un ADR que lo justifique. | Decidida con validación pendiente | Latencia p50/p95, memoria máxima, concurrencia de verificaciones. |
-| 3 | **Cron de revalidación.** GitHub Actions hoy; Vercel Schedules cuando salga de beta con condiciones aceptables. | Decidida | Endpoint idempotente, `last_success_at`, retraso acotado. |
+| 3 | **Cron de revalidación.** GitHub Actions hoy; Vercel Schedules cuando salga de beta con condiciones aceptables. | Decidida con validación pendiente | Endpoint idempotente, `last_success_at`, retraso acotado, medición de CU-h por despertar (Fase 0). |
 | 4 | **Caché pública con `"use cache"` + `cacheLife("max")`.** | Validación: pendiente | `x-vercel-cache` en visitas repetidas y lectura sin consultas a Neon. |
+| 5 | **CSP con hashes en lo público, nonces en `/admin`.** | Validación: pendiente | Verificar que los scripts inline de Next.js admitan hashes estáticos; si no, evaluar nonces en lo público. |
 
 ## Estado
 
