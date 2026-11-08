@@ -32,18 +32,22 @@ npm run build
 | Componente | Servicio | Costo |
 |------------|----------|-------|
 | Base de datos | Neon Free | $0 |
-| Imágenes | Cloudflare R2 Free | $0 de uso; puede pedir tarjeta para activar |
+| Imágenes | Vercel Blob | $0 en Hobby dentro de los límites |
 | Dominio de imágenes | Dominio propio en Cloudflare | **~USD 10/año** |
 | Hosting | Vercel Hobby | $0, solo uso no comercial |
 | CI | GitHub Actions | $0 en repo público |
 | Monitoreo | Servicio de uptime + tracker de errores | $0 en planes gratuitos |
 
-**El "costo cero" no es absoluto.** Dos excepciones hay que aceptarlas o cambiar de proveedor:
+**El "costo cero" es real en el plan Hobby.** Solo hay que respetar los límites de Blob:
 
-1. El dominio propio para servir R2. `r2.dev` es gratis, está limitado y no es para producción.
-2. El método de pago que R2 puede exigir para activarse. Cloudflare no ofrece tope de gasto duro.
+| Recurso | Incluido | Consecuencia de excederlo |
+|---------|----------|---------------------------|
+| Storage | 1 GB | Blob deja de estar accesible |
+| Transferencia | 10 GB/mes | Blob deja de estar accesible |
+| Operaciones simples | 10.000/mes | Blob deja de estar accesible |
+| Operaciones avanzadas | 2.000/mes | Blob deja de estar accesible |
 
-Si ninguna de las dos es aceptable, la alternativa es **Vercel Blob**: no requiere cuenta extra ni tarjeta, pero factura egress y ata el proyecto a Vercel. El adaptador `lib/storage.ts` permite cambiar sin tocar el resto.
+No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento hasta 30 días** y hay que esperar el ciclo. El límite más ajustado son las operaciones avanzadas: subir una imagen con tres variantes son cuatro `put` (cuatro operaciones). Da para ~500 imágenes nuevas al mes, muy por encima de un blog de un autor. Se mide y se evita resubir la misma imagen.
 
 **Vercel Hobby es no comercial.** Publicidad o afiliados obligan a Pro o a mover el hosting a Cloudflare Pages.
 
@@ -53,17 +57,19 @@ Si ninguna de las dos es aceptable, la alternativa es **Vercel Blob**: no requie
 |----------|-----------|-------------|
 | `DATABASE_URL` | Sí | Cadena **pooled** de Neon, para la aplicación |
 | `DATABASE_URL_UNPOOLED` | Sí | Cadena directa, para migraciones y `pg_dump` |
-| `ADMIN_PASSWORD_HASH` | Sí | `scrypt:16384:8:1:<saltB64>:<hashB64>` |
+| `ADMIN_PASSWORD_HASH` | Sí | `scrypt:131072:8:1:<saltB64>:<hashB64>` |
 | `IP_HASH_SECRET` | Sí | Secreto del HMAC que hashea IPs |
 | `PUBLIC_SITE_URL` | Sí | Origen de producción |
 | `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
 | `IMAGES_PUBLIC_BASE_URL` | Sí | Dominio público de imágenes |
 | `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
-| `R2_ACCOUNT_ID` | Sí | Cuenta de Cloudflare |
-| `R2_ACCESS_KEY_ID` | Sí | Token con alcance solo al bucket de imágenes |
-| `R2_SECRET_ACCESS_KEY` | Sí | Ídem |
-| `R2_BUCKET` | Sí | Bucket de imágenes |
-| `BACKUP_R2_*` | Sí | Token **distinto**, solo al bucket de backups |
+| `BLOB_STORE_ID` | Sí | ID del store de Vercel Blob |
+| `BLOB_READ_WRITE_TOKEN` | Sí | Token de lectura/escritura para desarrollo local y CI |
+| `IP_HASH_SECRET` | Sí | Secreto del HMAC que hashea IPs |
+| `PUBLIC_SITE_URL` | Sí | Origen de producción |
+| `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
+| `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
+| `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
 
 **El separador del hash es `:`, no `$`.** Next expande `$VAR` en los archivos `.env`; un hash con `$` queda corrupto y el login falla sin explicación.
 
@@ -77,17 +83,15 @@ Si ninguna de las dos es aceptable, la alternativa es **Vercel Blob**: no requie
 DATABASE_URL=postgresql://...@...-pooler.sa-east-1.aws.neon.tech/netti?sslmode=require
 DATABASE_URL_UNPOOLED=postgresql://...@...sa-east-1.aws.neon.tech/netti?sslmode=require
 
-ADMIN_PASSWORD_HASH=scrypt:16384:8:1:
+ADMIN_PASSWORD_HASH=scrypt:131072:8:1:
 IP_HASH_SECRET=
 CRON_SECRET=
 
 PUBLIC_SITE_URL=http://localhost:3000
-IMAGES_PUBLIC_BASE_URL=https://img.netti.example
+IMAGES_PUBLIC_BASE_URL=https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com
 
-R2_ACCOUNT_ID=
-R2_ACCESS_KEY_ID=
-R2_SECRET_ACCESS_KEY=
-R2_BUCKET=netti-images
+BLOB_STORE_ID=
+BLOB_READ_WRITE_TOKEN=
 ```
 
 Generar el hash:
@@ -104,7 +108,17 @@ c.scrypt(p, s, 64, { N: 2**17, r: 8, p: 1, maxmem: 256*1024*1024 }, (err, h) => 
 " "tu-contraseña"
 ```
 
-`scryptSync` se evita a propósito: bloquea el event loop y consume CPU activa.
+`scryptSync` se evita a propósito: bloquea el event loop y consume CPU activa. N=2^17 necesita `maxmem` explícito; sin él, Node falla con `ERR_CRYPTO_INVALID_SCRYPT_PARAMS`.
+
+El formato del hash debe coincidir **exactamente** entre lo que genera este comando y lo que parsea `lib/auth.ts`: `scrypt:<N>:<r>:<p>:<saltB64>:<hashB64>`. El primer número es el N real (131072), no el exponente (17) ni el valor por defecto de Node (16384).
+
+### 2.3.1 Versión exacta de las dependencias
+
+- `next` se fija **sin rango**: `"next": "16.4.5"`, no `"^16.4.5"`. Un despliegue tiene que ser reproducible.
+- `package-lock.json` se commitea y el CI usa `npm ci`.
+- Node se fija con `.nvmrc` y `engines` (24.x LTS).
+- Actualizaciones de seguridad: Renovate o Dependabot abre el PR, el CI corre, se revisa el advisory y se despliega. No se actualiza a ciegas ni se queda en una versión con vulnerabilidades conocidas por comodidad.
+- Active LTS no significa "seguro por defecto": los advisories de Next 16.4.x se revisan antes de cada bump.
 
 ### 2.4 Migraciones
 
@@ -127,6 +141,25 @@ Workflow nocturno:
 3. Cifrar con `age`.
 4. Subir a un bucket de backups con un token distinto y alcance mínimo.
 5. Retención de 30 días.
+6. Verificar el dump **antes** de darlo por bueno (ver checklist).
+
+**Checklist de integridad del backup.** Un dump que termina con código 0 puede estar incompleto o no ser restaurable:
+
+- [ ] El archivo existe, pesa más que un mínimo razonable y `pg_restore --list` lo abre sin error.
+- [ ] Incluye esquema, datos, tipos, funciones, triggers, índices y restricciones (el formato custom los lleva todos; verificarlo con `--list`).
+- [ ] Incluye las extensiones usadas (`pg_trgm`, `unaccent`, `pgcrypto` si se usa) y falla la restauración si no están disponibles.
+- [ ] Excluye `sessions` y `login_attempts`.
+- [ ] Los conteos de `articles`, `games` y `media` coinciden con los de producción al momento del dump (guardados en un archivo junto al dump).
+- [ ] La restauración de prueba mensual inserta datos y ejecuta una consulta pública real, no solo `count(*)`.
+
+**El backup de Postgres no incluye Blob.** Son dos recuperaciones distintas:
+
+| Qué | Cómo se recupera |
+|-----|------------------|
+| Artículos, juegos, metadatos de medios | `pg_dump` |
+| Objetos y variantes de imagen | Durabilidad de Blob + inventario verificable |
+
+`media.storage_key` es el inventario: un job de baja frecuencia compara las claves de la tabla con las del store y reporta faltantes y huérfanos. Si un objeto se borró por error, no se puede regenerar; por eso la purga es mark-and-sweep y nunca borra antes de confirmar la base.
 
 **Heartbeat**: si el workflow no corre, nadie se entera. Un chequeo externo (healthchecks.io, gratis) avisa cuando el dump falta. Los workflows programados de GitHub se desactivan tras 60 días sin actividad en repos públicos.
 
@@ -140,16 +173,25 @@ GitHub Action cada 30 minutos:
 curl -fsS -X POST "$SITE/api/revalidate" -H "Authorization: Bearer $CRON_SECRET"
 ```
 
-Vercel Hobby no sirve para esto: sus cron corren como máximo una vez por día y son dos por proyecto. El endpoint revalida solo los artículos cuyo `published_at` cruzó la hora.
+**Por qué no Vercel Cron.** Hay dos productos y ninguno sirve tal cual hoy:
+
+| Producto | Hobby | Problema |
+|----------|-------|----------|
+| Cron Jobs (legacy) | 100 jobs por proyecto, pero **mínimo una vez por día** | No permite cada 30 min |
+| Schedules (beta) | Cada 15 min con jitter, 5.000 ejecuciones por período | Beta; no se apuesta la publicación programada a un producto que puede cambiar |
+
+GitHub Actions es gratis, estable y no depende de un producto beta. Si Schedules sale de beta con condiciones aceptables, se migra sin tocar código: el endpoint es el mismo.
+
+El endpoint debe ser **idempotente**: revalida lo que ya cruzó `published_at` y no hace nada si no hay pendientes. Registra `last_run_at` y `last_activated_at` para que el panel y el monitor puedan distinguir "no había nada" de "el job dejó de correr". Si el job falla, el artículo aparece en la siguiente ejecución: retraso acotado, no fuga de contenido.
 
 ### 2.7 Despliegue
 
 1. Importar el repo en Vercel; framework Next.js; sin output directory manual.
 2. Proyecto Neon de producción y proyecto separado de previews.
-3. Bucket R2 + dominio propio; CORS no hace falta (la subida pasa por el servidor).
+3. Blob store creado en Vercel Storage; CORS no hace falta (la subida pasa por el servidor).
 4. Cargar variables en Production, Preview y Development.
 5. `npm run db:migrate` contra producción, una vez.
-6. Verificar: `/`, `/api/health`, login, subida, publicación, programación, backup y restauración.
+6. Verificar: `/`, `/api/health`, login, subida, publicación, programación, backup y restauración. `/api/ready` se prueba aparte, una vez, no en el monitor.
 
 ### 2.8 Scripts
 
@@ -167,10 +209,42 @@ Vercel Hobby no sirve para esto: sus cron corren como máximo una vez por día y
 
 ### 2.9 Monitoreo
 
-- **Uptime**: ping a una página pública cacheada o a `/api/health` (que no toca la base).
+- **Uptime**: ping a `/api/health`, que no toca la base. Nunca a `/api/ready`.
+- **Readiness**: `/api/ready` se consulta a mano o desde un job de baja frecuencia. Distingue "el sitio responde" de "la base está disponible".
 - **Errores**: Sentry u otro tracker. Los logs de Vercel Hobby tienen retención corta y no sirven como historial.
 - **CU-horas de Neon**: revisión mensual en la consola. Es el primer límite que se agota.
+- **Backups**: heartbeat externo; si el dump no llegó, alerta.
+- **Revalidación programada**: `last_run_at` visible; si se atrasa más de una hora, alerta.
 - **Degradación**: si Neon suspende el cómputo por cuota, el sitio cacheado sigue sirviendo y el panel deja de funcionar. El monitor tiene que avisar antes.
+
+### 2.10 Runbook mínimo
+
+Cada procedimiento empieza por confirmar el síntoma, no por reiniciar cosas.
+
+| Síntoma | Qué comprobar | Qué hacer |
+|---------|---------------|-----------|
+| El sitio público no carga | `/api/health` | Si responde, el problema es de datos o de caché; si no responde, revisar el despliegue en Vercel. |
+| El panel no entra | `/api/ready`, CU-horas en Neon | Cuota agotada → esperar el ciclo o pasar a plan pago; no hay atajo. |
+| Una publicación no aparece | `published_at`, `last_run_at` del cron | Revalidar el tag a mano desde el panel. |
+| Se borró una imagen por error | `media.storage_key` y el store | Restaurar desde el original del autor; el backup de Postgres no la contiene. |
+| Un backup falló | Heartbeat y logs del workflow | Ejecutarlo a mano antes de investigar; luego corregir la causa. |
+| Se publicó contenido incorrecto | `article_revisions` | Restaurar el snapshot anterior (crea una versión nueva). |
+| Neon suspendido por cuota | Consola de Neon | El sitio cacheado sigue; el panel no. Documentar la fecha y planificar el cambio de plan. |
+
+**Rotación de secretos**: `IP_HASH_SECRET` y `CRON_SECRET` se rotan sin downtime (el segundo, actualizando la Action). `BLOB_READ_WRITE_TOKEN` se rota creando un token nuevo en Vercel, desplegando y revocando el viejo. `ADMIN_PASSWORD_HASH` se regenera y se despliega; las sesiones abiertas siguen hasta expirar o se cierran con `logoutAll`.
+
+### 2.11 Pruebas
+
+| Nivel | Qué cubre | Dónde |
+|-------|-----------|-------|
+| Unitarias | Slug, Zod (borrador vs publicación), `affectedTags`, `safeJsonLd`, `safeCdata` | Vitest |
+| Integración | Publicar, editar, despublicar, papelera, restaurar con sufijo, purga, redirecciones | Vitest + Postgres 17 en service container |
+| Seguridad | Corpus XSS para Markdown y JSON-LD; orígenes ajenos en Server Actions | Vitest |
+| E2E | Login → crear → guardar borrador → publicar → ver en el sitio | Playwright, contra un preview |
+
+El service container usa Postgres 17 con las mismas extensiones (`unaccent`, `pg_trgm`). Los tests de integración corren las migraciones reales, no un esquema paralelo.
+
+Un test que no puede fallar no prueba nada: los casos de papelera y restauración verifican el estado final y las filas de `article_revisions`, no solo que la acción devuelva `ok`.
 
 ---
 
@@ -180,11 +254,14 @@ Vercel Hobby no sirve para esto: sus cron corren como máximo una vez por día y
 
 No es opcional: hay tres supuestos que pueden invalidar el diseño.
 
-- [ ] Next 16.4 con `cacheComponents: true`, `pg` + `attachDatabasePool` y una ruta de reseña prerenderizada leyendo Drizzle.
+- [ ] Next **16.4.5 fijado** (sin `^`) con `cacheComponents: true`, `pg` + `attachDatabasePool` y una ruta de reseña prerenderizada leyendo Drizzle.
 - [ ] Desplegar a Vercel y medir: `x-vercel-cache` en visitas repetidas y consumo de CU-horas en Neon tras 24 horas.
 - [ ] Verificar `updateTag` desde una Server Action: publicar y ver el cambio en la primera visita.
-- [ ] Subir una imagen real de 2 MB de punta a punta.
+- [ ] Medir `scrypt` con N=2^17 en la función: latencia y memoria. Si no entra, bajar N con criterio documentado, no en silencio.
+- [ ] Subir una imagen real de 2 MB de punta a punta contra un store de Blob real.
+- [ ] Confirmar que no hay factura y que Blob funciona dentro de los límites de Hobby.
 - [ ] `pg_dump` con cliente 17 contra la URL directa y restaurar en un contenedor.
+- [ ] Presupuesto de conexiones: empezar con `max: 1–3` por instancia y medir; `max: 5` no es un valor universal.
 
 **Listo cuando**: hay números reales de consumo y de invalidación. Si la lectura pública despierta Neon, se corrige antes de escribir el panel.
 
@@ -210,16 +287,17 @@ No es opcional: hay tres supuestos que pueden invalidar el diseño.
 - [ ] `visibleArticle`, `getArticle` con `"use cache"`, `cacheTag`, `cacheLife('max')`.
 - [ ] Rutas `/resenas`, `/noticias`, `/guias`, `/juegos`, `[slug]`.
 - [ ] Markdown sanitizado + JSON-LD escapado.
-- [ ] Sitemap, RSS, redirects on-demand.
+- [ ] Sitemap con `lastmod`, RSS general y por colección, redirects on-demand.
+- [ ] `robots.ts`, `noindex` en `/admin`, `not-found`/`error`/`global-error`.
 - [ ] **Backup y restauración probada.**
 
 ### Fase 4 — Panel (2 semanas)
 
-- [ ] Server Actions de contenido con `version` y snapshots.
+- [ ] Server Actions de contenido con `version` y snapshots **en la misma transacción**.
 - [ ] Layout a pantalla completa, borrador/publicar/despublicar.
-- [ ] Autoguardado validado con Zod al restaurar.
-- [ ] `affectedTags()` y `updateTag`.
-- [ ] Programación por `published_at` + endpoint de revalidación.
+- [ ] Autoguardado validado con Zod al restaurar, sin guardar credenciales ni tokens.
+- [ ] `affectedTags()` y `updateTag` después del `COMMIT`.
+- [ ] Programación por `published_at` + endpoint de revalidación idempotente.
 
 ### Fase 5 — Imágenes (1 semana)
 
@@ -239,6 +317,8 @@ No es opcional: hay tres supuestos que pueden invalidar el diseño.
 - [ ] Búsqueda con `unaccent` y `websearch_to_tsquery`.
 - [ ] Etiquetas, relacionados, breadcrumbs.
 - [ ] CSP final, revisión de cabeceras.
+- [ ] Tests unitarios, de integración, de seguridad y E2E en verde.
+- [ ] Atribución de imágenes y aviso legal/privacidad si se añade analítica.
 - [ ] Analítica sin cookies, monitoreo, runbook de restauración.
 
 ### Métricas

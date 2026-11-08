@@ -36,11 +36,10 @@ export type ActionResult<T = undefined> =
       message: string;
       fieldErrors?: Record<string, string[]>;
       current?: unknown;
-      suggestedSlug?: string;
     };
 ```
 
-Los componentes leen `result.ok` y muestran `message` o `fieldErrors`. No hay códigos HTTP que interpretar, salvo en los dos Route Handlers.
+Los componentes leen `result.ok` y muestran `message` o `fieldErrors`. No hay códigos HTTP que interpretar, salvo en los Route Handlers.
 
 ---
 
@@ -77,6 +76,30 @@ Borra la fila de `sessions` y la cookie. Idempotente.
 
 ## 4. Contenido
 
+### 4.0 Una escritura, una transacción
+
+Actualizar el artículo e insertar su revisión son **una sola transacción**. Si se hacen por separado, una desconexión entre ambas deja el artículo guardado sin snapshot o un snapshot de algo que nunca se guardó. La invalidación de caché va **después del `COMMIT`**: invalidar antes de confirmar publica un estado que puede revertirse.
+
+```ts
+await db.transaction(async (tx) => {
+  const [row] = await tx
+    .update(articles)
+    .set(values)
+    .where(and(eq(articles.id, id), eq(articles.version, version)))
+    .returning({ version: articles.version, slug: articles.slug, status: articles.status });
+
+  if (!row) throw new StaleVersion();
+
+  await tx.insert(articleRevisions).values({
+    articleId: id,
+    version: row.version,
+    snapshot: values,
+  });
+});
+```
+
+El trigger `BEFORE UPDATE` incrementa `version` y fija `updated_at`. `RETURNING` ve los valores **después** del trigger, así que devuelve la versión nueva sin un `SELECT` extra y sin incrementar dos veces. Si la fila no cambió (misma versión devuelta), no se inserta una revisión duplicada. Si `rowCount = 0`, se consulta la fila para distinguir `not_found` de `conflict`.
+
 ### `createArticle(input)`
 
 ```ts
@@ -102,15 +125,13 @@ async function updateArticle(args: {
 }): Promise<ActionResult<{ version: number; slug: string; status: ContentStatus }>>;
 ```
 
-Ejecuta `UPDATE ... WHERE id = $id AND version = $version RETURNING version`. Si no devuelve fila, hace un `SELECT` para distinguir:
+Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $version RETURNING version` + `INSERT` en `article_revisions`. Si no devuelve fila, hace un `SELECT` para distinguir:
 
 | Situación | `code` | Extra |
 |-----------|--------|-------|
 | No existe | `not_found` | — |
 | Versión desactualizada | `conflict` | `current` con el estado actual |
 | Slug ocupado | `conflict` | `fieldErrors.slug` |
-
-Antes del `UPDATE` inserta un snapshot en `article_revisions` con la versión anterior.
 
 **Editar una entrada publicada**: guardar cambios **no la despublica**. Mantiene `status = 'published'` y revalida. Para sacarla del aire hay una acción explícita, `unpublishArticle`.
 
@@ -124,17 +145,42 @@ Guarda `previous_status` y `trashed_at`, pone `status = 'trashed'`. Libera el sl
 
 ### `restoreArticle({ id })`
 
-Vuelve a `previous_status` y limpia `trashed_at`. Si el slug está tomado, el `UPDATE` falla con `23505` y devuelve:
+Vuelve a `previous_status` y limpia `trashed_at`. **No hay pre-chequeo**: comprobar si el slug está libre antes del `UPDATE` es una condición de carrera. Se intenta el `UPDATE` y se captura la violación de unicidad.
 
-```json
-{ "ok": false, "code": "conflict", "message": "El slug ya está en uso.", "suggestedSlug": "mi-articulo-2" }
+Dos detalles que un `catch (23505)` genérico no resuelve:
+
+1. **Identificar la restricción.** Solo se trata como conflicto de slug si el error corresponde a `articles_kind_slug_active`. Un `23505` de otra restricción es un error real y no debe convertirse en "elegí otro slug".
+2. **Reintentar hasta encontrar un sufijo libre.** `mi-articulo-2` también puede estar tomado. Se prueban `-2`, `-3`, … hasta un límite (10); si ninguno sirve, se devuelve `conflict` sin sugerencia.
+
+```ts
+for (let attempt = 2; attempt <= 11; attempt++) {
+  const candidate = attempt === 2 ? slug : `${slug}-${attempt}`;
+  try {
+    return await restoreWithSlug(id, candidate); // UPDATE ... RETURNING
+  } catch (error) {
+    if (!isUniqueViolation(error, "articles_kind_slug_active")) throw error;
+  }
+}
+return { ok: false, code: "conflict", message: "No se pudo liberar el slug." };
 ```
 
-El panel acepta el sufijo y reintenta. **No hay pre-chequeo**: sería una condición de carrera.
+Cada reintento es un `UPDATE`; el que gana es el que la base acepta. El resultado exitoso incluye el slug definitivo para que el panel lo muestre y cree la redirección:
+
+```json
+{ "ok": true, "data": { "slug": "mi-articulo-2" } }
+```
 
 ### `purgeArticle({ id, confirmSlug })`
 
-Borrado definitivo. Exige escribir el slug para confirmar. Elimina revisión, filas de `media` no referenciadas y sus objetos en R2. Las imágenes referenciadas por otro artículo no se tocan.
+Borrado definitivo. Exige escribir el slug para confirmar.
+
+**Orden mark-and-sweep** (Postgres y Blob no comparten transacción):
+
+1. En una transacción: marcar `media.pending_delete_at` para los medios que ninguna otra entrada referencia (portada, `og_image_url` o `media:<id>` en el cuerpo) y borrar la fila del artículo (las revisiones caen por `ON DELETE CASCADE`).
+2. Fuera de la transacción: borrar en Blob el objeto y sus variantes.
+3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
+
+Si el paso 2 falla, la fila queda marcada y un barrido de baja frecuencia reintenta. Nunca se borra el objeto antes de confirmar la base: eso deja referencias rotas que no se pueden reparar. Las imágenes referenciadas por otro artículo no se marcan.
 
 ### `searchGames({ q, limit })`
 
@@ -160,28 +206,30 @@ Validaciones, en orden:
 
 1. Sesión válida → `401`.
 2. Origen permitido → `403`.
-3. `Content-Length <= 2 MB` → `413` antes de leer el cuerpo.
-4. MIME en la allowlist → `400`.
-5. Magic numbers → `400`.
-6. Dimensiones decodificadas y megapíxeles ≤ 20 → `400`.
-7. `sharp`: re-encodeo a WebP, lado mayor ≤ 2560 px, sin EXIF.
-8. Variantes 480 / 960 / 1600 px.
+3. `Content-Length <= 2 MB + margen` → `413` antes de leer el cuerpo. Es una optimización, **no la defensa**: el header puede faltar o mentir.
+4. Leer el `File` y comprobar el **tamaño real** ≤ 2 MB y que el cuerpo total no supere el presupuesto (2 MB + 64 KB de formulario).
+5. MIME declarado en la allowlist → `400`.
+6. Magic numbers del contenido real → `400`.
+7. Dimensiones decodificadas y megapíxeles ≤ 20 → `400`.
+8. GIF (estático o animado) → `400`. La salida es WebP estático y `sharp` perdería los fotogramas o el formato original en silencio; se rechaza con un mensaje explícito en vez de degradar la imagen.
+9. `sharp`: re-encodeo a WebP, lado mayor ≤ 2560 px, sin EXIF.
+10. Variantes 480 / 960 / 1600 px.
 
-Respuesta:
+La respuesta:
 
 ```json
 {
   "ok": true,
   "media": {
     "id": 12,
-    "url": "https://img.netti.example/articles/8f3c1a2e.webp",
+    "url": "https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com/articles/8f3c1a2e.webp",
     "width": 1600,
     "height": 900,
     "bytes": 184320,
     "variants": [
-      { "width": 480, "url": "https://img.netti.example/articles/8f3c1a2e-480.webp" },
-      { "width": 960, "url": "https://img.netti.example/articles/8f3c1a2e-960.webp" },
-      { "width": 1600, "url": "https://img.netti.example/articles/8f3c1a2e-1600.webp" }
+      { "width": 480, "url": "https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com/articles/8f3c1a2e-480.webp" },
+      { "width": 960, "url": "https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com/articles/8f3c1a2e-960.webp" },
+      { "width": 1600, "url": "https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com/articles/8f3c1a2e-1600.webp" }
     ]
   }
 }
@@ -189,13 +237,16 @@ Respuesta:
 
 | Código | Cuerpo |
 |--------|--------|
-| 400 | `{ "error": "Formato no admitido. Usá JPEG, PNG, WebP, GIF o AVIF." }` |
+| 400 | `{ "error": "Formato no admitido. Usá JPEG, PNG, WebP o AVIF." }` |
 | 400 | `{ "error": "El archivo no coincide con su tipo declarado." }` |
+| 400 | `{ "error": "Las imágenes animadas no están soportadas." }` |
 | 400 | `{ "error": "La imagen supera el tamaño de píxeles permitido." }` |
 | 413 | `{ "error": "La imagen no puede superar los 2 MB." }` |
 | 500 | `{ "error": "No se pudo guardar la imagen." }` |
 
-La clave del objeto es `articles/<uuid>.webp` o `games/<uuid>.webp`: nunca el nombre original ni el slug. Se guarda con `Cache-Control: public, max-age=31536000, immutable`.
+La subida pasa por `@vercel/blob` (`put`) desde el servidor. El token se resuelve con OIDC en Vercel; en desarrollo local se usa `BLOB_READ_WRITE_TOKEN`.
+
+La clave del objeto es `articles/<uuid>.webp` o `games/<uuid>.webp`: nunca el nombre original ni el slug. Se guarda con `cacheControlMaxAge: 31536000` (caché larga; el contenido nunca cambia porque la clave lleva UUID).
 
 ### 5.2 `POST /api/revalidate`
 
@@ -212,9 +263,22 @@ Authorization: Bearer $CRON_SECRET
 
 Si `CRON_SECRET` falta o no coincide: `401`. Sin este endpoint, un artículo programado se ve tarde o no se ve.
 
-### 5.3 `GET /api/health`
+### 5.3 `GET /api/health` y `GET /api/ready`
 
-Responde `200` con `{ "ok": true }` **sin tocar Postgres**. Sirve para monitoreo de uptime; un health que consulta la base la despierta y consume CU-horas.
+Son dos comprobaciones distintas y no intercambiables.
+
+| Endpoint | Qué prueba | Toca Postgres | Frecuencia |
+|----------|-----------|---------------|------------|
+| `/api/health` | *Liveness*: el proceso responde | No | Cada 1–5 min (uptime monitor) |
+| `/api/ready` | *Readiness*: DB y almacenamiento alcanzables | Sí (`select 1`) | Cada 30–60 min, o solo desde el runbook |
+
+`/api/health` devuelve `200` con `{ "ok": true }` y `Cache-Control: no-store`. Un health que consulta la base la despierta y consume CU-horas: eso es exactamente lo que este diseño evita.
+
+`/api/ready` no se expone al monitor público. Se llama a mano cuando algo falla, o desde un job de baja frecuencia que además registra el resultado. Devuelve `503` con el componente que falló:
+
+```json
+{ "ok": false, "db": "unreachable", "storage": "ok" }
+```
 
 ---
 

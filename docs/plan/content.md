@@ -86,8 +86,12 @@ begin
   -- Evita el ciclo directo A→B / B→A
   delete from redirects
    where from_path = new.to_path and to_path = new.from_path;
-  -- Colapsa cadenas: si X→A existía y ahora A→B, X pasa a apuntar a B
-  update redirects set to_path = new.to_path where to_path = new.from_path;
+  -- Colapsa cadenas: si X→A existía y ahora A→B, X pasa a apuntar a B.
+  -- El filtro evita crear un auto-redirect al colapsar sobre la fila que se está insertando.
+  update redirects
+     set to_path = new.to_path
+   where to_path = new.from_path
+     and from_path <> new.to_path;
   return new;
 end;
 $$;
@@ -133,7 +137,11 @@ create index games_tags_idx on games using gin (platforms, genres);
 create trigger games_set_updated_at
   before update on games
   for each row
-  when (old.* is distinct from new.*)
+  when (
+    to_jsonb(old) - 'updated_at' - 'version'
+    is distinct from
+    to_jsonb(new) - 'updated_at' - 'version'
+  )
   execute function set_updated_at();
 ```
 
@@ -169,7 +177,7 @@ create table articles (
   verdict          text,
 
   -- Noticias
-  category         text not null default 'Noticias',
+  category         text,
   source_name      text,
   source_url       text,
 
@@ -197,6 +205,8 @@ create table articles (
     check (status <> 'published' or published_at is not null),
   constraint articles_trashed_requires_date
     check (status <> 'trashed' or trashed_at is not null),
+  constraint articles_trashed_requires_previous
+    check (status <> 'trashed' or previous_status is not null),
 
   -- Publicación completa
   constraint articles_publish_title
@@ -213,12 +223,15 @@ create table articles (
   constraint articles_review_complete
     check (kind <> 'review' or status <> 'published' or (
       game_id is not null
+      and score is not null
       and score between 1 and 10
       and char_length(btrim(coalesce(score_reason, ''))) >= 20
       and char_length(btrim(coalesce(verdict, ''))) >= 10
     )),
   constraint articles_news_fields_only
-    check (kind = 'news' or (source_name is null and source_url is null))
+    check (kind = 'news' or (category is null and source_name is null and source_url is null)),
+  constraint articles_news_category_len
+    check (category is null or char_length(category) <= 40)
 );
 
 create unique index articles_kind_slug_active
@@ -235,6 +248,11 @@ create index articles_featured_idx
 
 create index articles_tags_idx on articles using gin (tags);
 
+-- Publicaciones programadas: el job de revalidación solo mira este subconjunto
+create index articles_pending_activation_idx
+  on articles (published_at)
+  where status = 'published';
+
 create trigger articles_validate_tags
   before insert or update on articles
   for each row execute function validate_tags();
@@ -242,7 +260,11 @@ create trigger articles_validate_tags
 create trigger articles_set_updated_at
   before update on articles
   for each row
-  when (old.* is distinct from new.*)
+  when (
+    to_jsonb(old) - 'updated_at' - 'version'
+    is distinct from
+    to_jsonb(new) - 'updated_at' - 'version'
+  )
   execute function set_updated_at();
 ```
 
@@ -250,11 +272,14 @@ create trigger articles_set_updated_at
 
 **`previous_status` y `trashed_at`** existen porque "restaurar devuelve el estado anterior" necesita dónde guardarlo. Sin esas columnas, restaurar solo puede adivinar.
 
-**`WHEN (OLD.* IS DISTINCT FROM NEW.*)`** evita que un `UPDATE` que no cambia nada (un backfill, un toque de mantenimiento) incremente `version` y provoque un `409` falso en el formulario abierto.
+**`WHEN` sobre `to_jsonb(old)` menos `updated_at` y `version`** evita dos cosas: que un `UPDATE` que no cambia nada incremente `version`, y que el propio trigger, al escribir `updated_at`, se considere un cambio. Comparar `OLD.*` a secas incluiría esos dos campos de mantenimiento; excluirlos por nombre en JSONB no obliga a reescribir el trigger cuando se agrega una columna.
 
 ### 2.3 Búsqueda full-text
 
 ```sql
+create extension if not exists unaccent;
+create extension if not exists pg_trgm;
+
 create text search configuration es_unaccent (copy = spanish);
 
 alter text search configuration es_unaccent
@@ -277,6 +302,10 @@ create index articles_search_idx on articles using gin (search_vector);
 - Consulta: `websearch_to_tsquery('es_unaccent', $1)`, que tolera frases entre comillas y `OR` sin romper con entrada arbitraria.
 - Autocompletado de juegos: `pg_trgm` con `gin (title gin_trgm_ops)` y `similarity()`. `tsvector` no sirve para prefijos de dos letras.
 
+```sql
+create index games_title_trgm_idx on games using gin (title gin_trgm_ops);
+```
+
 ### 2.4 `media`
 
 ```sql
@@ -287,28 +316,50 @@ create table media (
   width         integer not null check (width > 0),
   height        integer not null check (height > 0),
   bytes         integer not null check (bytes > 0),
-  content_type  text not null check (content_type in
-                  ('image/jpeg','image/png','image/webp','image/gif','image/avif')),
+  content_type  text not null default 'image/webp'
+                  check (content_type = 'image/webp'),
   alt           text,
   credit        text,
+  rights        text not null default 'own'
+                  check (rights in ('own', 'press', 'third_party')),
+  source_url    text,
+  -- Procedencia: dónde se subió. No implica propiedad exclusiva: el cuerpo
+  -- puede referenciar el mismo medio desde otro artículo.
   article_id    integer references articles (id) on delete set null,
   game_id       integer references games (id) on delete set null,
+  pending_delete_at timestamptz,
   created_at    timestamptz not null default now(),
   constraint media_single_owner
     check (num_nonnulls(article_id, game_id) <= 1)
 );
 
+create index media_pending_delete_idx
+  on media (pending_delete_at)
+  where pending_delete_at is not null;
+
 create table media_variants (
   media_id   integer not null references media (id) on delete cascade,
   width      integer not null,
-  format     text not null check (format in ('webp','avif')),
+  format     text not null default 'webp' check (format = 'webp'),
   storage_key text not null unique,
   bytes      integer not null,
   primary key (media_id, width, format)
 );
 ```
 
-Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas huérfanas se acumulan. `credit` cubre el requisito legal de atribuir capturas de prensa.
+Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas huérfanas se acumulan. `credit`, `rights` y `source_url` documentan procedencia: una carátula disponible públicamente no es una carátula libre de derechos.
+
+`article_id` registra **dónde se subió**, no una propiedad exclusiva. Antes de purgar un medio, se comprueba que ningún otro artículo lo referencie: `cover_image_url`, `og_image_url` y las apariciones de `media:<id>` en el cuerpo. Es una consulta de texto sobre `articles.body`, acotada a los medios candidatos, no un escaneo de toda la tabla.
+
+**Borrado consistente.** Postgres y Blob no comparten transacción, así que el orden importa:
+
+1. En una transacción: marcar `pending_delete_at` para los medios que ninguna otra entrada referencia y borrar la fila del artículo (las revisiones caen por `ON DELETE CASCADE`).
+2. Fuera de la transacción: borrar en Blob el objeto y sus variantes.
+3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
+
+Si Blob falla, la fila queda marcada y se reintenta. Nunca al revés: borrar el objeto antes de confirmar la base deja referencias rotas que no se pueden reparar.
+
+**Imágenes dentro del cuerpo.** No se pegan URLs. El editor inserta `![texto alternativo](media:12)` y un plugin de remark resuelve el id contra `media`/`media_variants`, genera `srcset` y dimensiones. Así la purga sabe qué medios referencia el cuerpo, se evita CLS y una URL mal copiada no rompe la imagen.
 
 ### 2.5 `article_revisions`
 
@@ -411,13 +462,13 @@ Comparar `origin` y no `startsWith` evita que `https://img.netti.example.evil.co
 
 ### 3.1 Esquema de artículo
 
-Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe la URL del almacenamiento y construye `cover` una sola vez. El servidor la llama con `env.IMAGES_PUBLIC_BASE_URL`; el cliente, con el valor que expone el layout. Así no hay ningún `process.env` en código compartido.
+Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe la URL del almacenamiento y construye `cover` una sola vez. El servidor la llama con `env.IMAGES_PUBLIC_BASE_URL`; el cliente, con el valor que expone el layout. Así no hay ningún `process.env` en código compartido. Los bloques de esta sección se leen como un solo módulo.
 
 ```ts
 const cover = imageUrlSchema(imagesBaseUrl);
 
+// Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
 const baseArticle = z.object({
-  kind: z.enum(["review", "news", "guide"]),
   slug: z
     .string()
     .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Solo minúsculas, números y guiones.")
@@ -436,14 +487,31 @@ const baseArticle = z.object({
   seoDescription: z.string().trim().max(160).nullable().optional(),
   ogImageUrl: cover,
 });
-```
 
-Las variantes por `kind` se derivan de `baseArticle` y el resultado se devuelve desde la fábrica. Los miembros de `discriminatedUnion` van **sin refinar**; las reglas condicionales se aplican después con `superRefine`, porque un `discriminatedUnion` no acepta miembros refinados:
+const reviewShape = baseArticle.extend({
+  kind: z.literal("review"),
+  gameId: z.number().int().positive().nullable().optional(),
+  score: z.number().int().min(1).max(10).nullable().optional(),
+  scoreReason: z.string().trim().max(2000).nullable().optional(),
+  verdict: z.string().trim().max(500).nullable().optional(),
+});
 
-```ts
-  const articleSchema = z
-    .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
-    .superRefine((value, ctx) => {
+const newsShape = baseArticle.extend({
+  kind: z.literal("news"),
+  category: z.string().trim().max(40).nullable().optional(),
+  sourceName: z.string().trim().max(120).nullable().optional(),
+  sourceUrl: z
+    .string()
+    .regex(/^https?:\/\//i, "La fuente debe empezar por http:// o https://.")
+    .nullable()
+    .optional(),
+});
+
+const guideShape = baseArticle.extend({ kind: z.literal("guide") });
+
+const articleSchema = z
+  .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
+  .superRefine((value, ctx) => {
     const publishing = value.status === "published";
     if (!publishing) return;
 
@@ -463,13 +531,19 @@ Las variantes por `kind` se derivan de `baseArticle` y el resultado se devuelve 
         ctx.addIssue({ code: "custom", path: ["gameId"], message: "Elegí un juego." });
       if (value.score == null)
         ctx.addIssue({ code: "custom", path: ["score"], message: "Falta la puntuación." });
-      if (value.scoreReason.trim().length < 20)
+      if (!value.scoreReason || value.scoreReason.trim().length < 20)
         ctx.addIssue({ code: "custom", path: ["scoreReason"], message: "Justificá la puntuación (mínimo 20)." });
-      if (value.verdict.trim().length < 10)
+      if (!value.verdict || value.verdict.trim().length < 10)
         ctx.addIssue({ code: "custom", path: ["verdict"], message: "El veredicto necesita al menos 10 caracteres." });
     }
   });
+
+return articleSchema;
 ```
+
+El `kind` es un literal por variante, así que `discriminatedUnion` estrecha el tipo: en `value.kind === "review"`, `gameId` y `score` existen en el tipo. Los campos de reseña son nullable para que un borrador incompleto sea válido; la exigencia aparece al publicar, en el mismo lugar que los `CHECK` de la base.
+
+`sourceUrl` usa la misma regla que el `CHECK` (`~*`), insensible a mayúsculas. Si Zod fuera más laxo, `HTTPS://x` pasaría la validación y fallaría en la base con un `500`.
 
 **Versión de Zod**: se fija Zod 4 en `package.json`. Si se usara Zod 3, el `superRefine` externo sigue siendo la forma correcta; no cambiar la estructura al migrar.
 
@@ -478,10 +552,12 @@ Las variantes por `kind` se derivan de `baseArticle` y el resultado se devuelve 
 ```ts
 export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
 export const MAX_MEGAPIXELS = 20;
-export const ALLOWED = ["image/jpeg","image/png","image/webp","image/gif","image/avif"] as const;
+export const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/avif"] as const;
 ```
 
-El servidor valida, en este orden: tamaño declarado, MIME, magic numbers, dimensiones decodificadas y megapíxeles. Después re-encodea con `sharp` (elimina EXIF y polyglots) y genera las variantes.
+El servidor valida, en este orden: tamaño declarado (como pista), tamaño real, MIME, magic numbers, dimensiones decodificadas y megapíxeles. Después re-encodea con `sharp`, que descarta EXIF (incluido GPS) y las estructuras del archivo original, y genera las variantes. `sharp` reduce la superficie de un archivo manipulado; no es una garantía absoluta frente a vulnerabilidades del decodificador, así que la dependencia se mantiene actualizada.
+
+**GIF queda fuera.** La salida es WebP estático y `sharp` descartaría los fotogramas en silencio. Aceptar el formato para luego romper la animación es peor que rechazarlo con un mensaje claro. Si algún día se necesitan animaciones, se decide y se implementa entonces.
 
 ---
 
@@ -495,12 +571,12 @@ El servidor valida, en este orden: tamaño declarado, MIME, magic numbers, dimen
 | `published` | Guardar cambios | `published` | Revalida; no despublica |
 | `published` | Despublicar | `draft` | `published_at` se conserva |
 | `draft` / `published` | Borrar | `trashed` | Guarda `previous_status` y `trashed_at` |
-| `trashed` | Restaurar | `previous_status` | Si el slug está tomado, se propone sufijo |
-| `trashed` | Purgar | — | Borra fila, revisiones y medios propios |
+| `trashed` | Restaurar | `previous_status` | Si el slug está tomado, el servidor reintenta con sufijo |
+| `trashed` | Purgar | — | Marca, borra en Blob y recién entonces borra las filas |
 
-**No existe `scheduled`.** Un artículo `published` con `published_at` futuro no es visible porque la consulta pública exige `published_at <= now()`. Eso elimina un valor del enum, un `CHECK` y la dependencia de un cron que en Vercel Hobby solo corre una vez al día.
+**No existe `scheduled`.** Un artículo `published` con `published_at` futuro no es visible porque la consulta pública exige `published_at <= now()`. Eso elimina un valor del enum y un `CHECK`. La decisión de cuándo se hace visible no depende de un cron: el dato ya es correcto aunque nadie revalide.
 
-Lo que sí necesita un cron es **invalidar la caché** cuando llega la hora. Se resuelve con una GitHub Action cada 30 minutos que llama a un endpoint protegido y revalida lo que cruzó `published_at`. Si el cron falla, el artículo se ve igual en la siguiente revalidación; el peor caso es un retraso, no una fuga.
+Lo que sí necesita un job es **invalidar la caché** cuando llega la hora. Se resuelve con una GitHub Action cada 30 minutos que llama a un endpoint protegido, idempotente, que revalida lo que cruzó `published_at` desde la última ejecución. Si falla, el artículo se ve igual en la siguiente revalidación; el peor caso es un retraso, no una fuga.
 
 ### Predicado único de visibilidad
 
@@ -517,15 +593,16 @@ Toda consulta pública usa este helper. No se escribe la condición a mano en ni
 
 ## 5. Imágenes
 
-- Almacenamiento: R2, servido por un dominio propio.
-- Clave: `articles/<uuid>.<ext>` o `games/<uuid>.<ext>`. **Nunca** el nombre del archivo del usuario ni el slug, que cambian.
-- Al subir: `sharp` re-encodea a WebP, limita a 2560 px de lado mayor, elimina EXIF (incluido GPS) y genera variantes de 480, 960 y 1600 px.
-- `Cache-Control: public, max-age=31536000, immutable` en cada `PutObject`.
+- Almacenamiento: Vercel Blob, servido desde `*.public.blob.vercel-storage.com` sin dominio propio.
+- Clave: `articles/<uuid>.webp` o `games/<uuid>.webp` (la salida es siempre WebP). **Nunca** el nombre del archivo del usuario ni el slug, que cambian.
+- `sharp` limita a 2560 px de lado mayor, descarta EXIF (incluido GPS) y genera variantes de 480, 960 y 1600 px.
+- `cacheControlMaxAge: 31536000` en cada `put` (caché larga, segura porque la clave lleva UUID y el contenido nunca cambia).
 - Se inserta una fila en `media` y una por variante en `media_variants`.
 - El render usa un `loader` propio que elige la variante según `srcset`. No se delega a `next/image` por defecto: la cuota de transformaciones de Hobby es de 5.000 al mes y cada combinación de ancho, formato y calidad cuenta.
-- SVG rechazado. AVIF acepta las marcas `avif`, `avis` y `mif1` con `avif` compatible.
+- SVG rechazado. GIF rechazado (la salida es estática). AVIF acepta las marcas `avif`, `avis` y `mif1` con `avif` compatible.
 - Tope de 2 MB en la subida, pero el cliente **redimensiona antes** a WebP: una captura PNG de 1080p supera los 2 MB con facilidad.
-- Borrar un artículo no borra sus imágenes (papelera). La purga definitiva sí, y solo las que no estén referenciadas en otro artículo.
+- **Imágenes del cuerpo**: el Markdown guarda `![alt](media:12)`, nunca una URL pegada. Un plugin de remark resuelve el id, obtiene dimensiones y variantes de `media`, y genera `<img srcset sizes width height>`. Así se evita CLS, la purga sabe qué medios referencia el cuerpo y una URL mal copiada no rompe la imagen.
+- Borrar un artículo no borra sus imágenes (papelera). La purga definitiva sí, siguiendo el orden mark-and-sweep de §2.4. Blob no tiene concepto de "pendiente de eliminación" a nivel de bucket; la marca vive en Postgres y el sweeper lee esa tabla para saber qué borrar de Blob.
 
 ---
 

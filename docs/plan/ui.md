@@ -98,8 +98,8 @@ Listado por colección con estado, versión y última modificación. Acciones: E
 2. Se elige la colección.
 3. Título genera el slug.
 4. Cuerpo Markdown con barra mínima: negrita, itálica, enlace, H2, cita, imagen, lista.
-5. Metadatos según colección. En reseñas, el juego se busca con autocompletado (`pg_trgm`); si no existe, se crea la ficha desde ahí.
-6. Portada: se elige o arrastra; **el cliente redimensiona a WebP antes de subir**, porque un PNG de 1080p supera los 2 MB.
+5. Metadatos según colección. En reseñas, el juego se busca con autocompletado (`pg_trgm`). Crear la ficha desde la reseña queda para después del primer lanzamiento: en la v1, la ficha se crea antes desde Juegos.
+6. **Portada e imágenes del cuerpo**: se eligen de la biblioteca de medios o se suben arrastrando. **El cliente redimensiona a WebP antes de subir**, porque un PNG de 1080p supera los 2 MB. Cada imagen exige texto alternativo y permite crédito y procedencia (`own`, `press`, `third_party`). Las imágenes del cuerpo no se pegan como URL: se insertan desde el selector y el Markdown guarda `![alt](media:12)`, que el render resuelve con `srcset` y dimensiones.
 7. Guardar borrador o publicar. Los errores aparecen junto al campo.
 
 ### 7.4 Editar
@@ -110,23 +110,25 @@ Se carga la entrada con su `version`. Al guardar se envía esa versión. Si otro
 
 ### 7.5 Programar
 
-Se elige una fecha futura y se publica. La entrada queda `published` con `published_at` futuro y no se ve hasta la hora. El cron de revalidación la activa.
+Se elige una fecha futura y se publica. La entrada queda `published` con `published_at` futuro y no se ve hasta la hora. El job de revalidación la activa.
+
+La interfaz dice **"Se publica el 12/12 a las 09:00"** y no promete precisión al segundo: el job corre cada 30 minutos, así que el retraso máximo esperado es media hora. Si el job se atrasa, la entrada aparece igual en la siguiente ejecución; nunca se muestra antes de tiempo porque la consulta exige `published_at <= now()`.
 
 ### 7.6 Vista previa
 
-Modal con la plantilla real: cabecera, ancho, tipografía, JSON-LD. `Esc` cierra y devuelve el foco.
+Modal con la plantilla real: cabecera, ancho, tipografía, JSON-LD. `Esc` cierra y devuelve el foco. Usa **el mismo pipeline de sanitizado y el mismo resolvedor de `media:`** que el sitio público; si el cliente renderizara distinto, la vista previa mentiría.
 
 ### 7.7 Borrar y papelera
 
 1. Confirmación con el título.
 2. Pasa a `trashed` guardando el estado anterior y la fecha. El slug queda libre.
 3. Papelera: recuperar o eliminar definitivamente.
-4. Recuperar con slug ocupado propone un sufijo y crea la redirección.
-5. Purgar exige escribir el slug y borra revisión, medios no referenciados y objetos en R2.
+4. **Recuperar con slug ocupado**: el servidor reintenta con `-2`, `-3`… hasta 10 veces y devuelve el slug definitivo. El panel no lo pide antes ni lo elige: muestra "Se recuperó como `mi-articulo-2`" y crea la redirección desde `/…/mi-articulo`.
+5. Purgar exige escribir el slug y sigue el orden mark-and-sweep: primero se marca y se borra la fila, después el objeto en Blob. Si Blob falla, la imagen queda pendiente y se reintenta; el artículo ya no está.
 
 ### 7.8 Historial
 
-Lista de revisiones con fecha y versión. Se puede ver el snapshot y restaurar uno anterior (crea una versión nueva, no reescribe el pasado). Se conservan las últimas 20.
+Lista de revisiones con fecha y versión. Se puede ver el snapshot y restaurar uno anterior (crea una versión nueva, no reescribe el pasado). Se conservan las últimas 20. Restaurar un snapshot es una escritura normal: exige la `version` actual y pasa por Zod como cualquier otra.
 
 ### 7.9 Cerrar sesión
 
@@ -143,5 +145,7 @@ Borra la sesión en el servidor y la cookie. "Cerrar todas las sesiones" invalid
 | Slug ocupado | "Ese slug ya está en uso. Probá con otro." |
 | Sesión vencida | "Tu sesión venció. Volvé a entrar; tu borrador está guardado en este navegador." |
 | Imagen grande | "La imagen no puede superar los 2 MB." |
-| Formato inválido | "Formato no admitido. Usá JPEG, PNG, WebP, GIF o AVIF." |
+| Imagen animada | "Las imágenes animadas no están soportadas." |
+| Formato inválido | "Formato no admitido. Usá JPEG, PNG, WebP o AVIF." |
+| Recuperado con sufijo | "Se recuperó como «mi-articulo-2»." |
 | Sin conexión | "No se pudo guardar. Tu borrador sigue en este navegador." |
