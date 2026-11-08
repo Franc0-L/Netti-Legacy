@@ -164,11 +164,9 @@ for (let attempt = 2; attempt <= 11; attempt++) {
 return { ok: false, code: "conflict", message: "No se pudo liberar el slug." };
 ```
 
-Cada reintento es un `UPDATE`; el que gana es el que la base acepta. El resultado exitoso incluye el slug definitivo para que el panel lo muestre y cree la redirección:
+Cada reintento es un `UPDATE`; el que gana es el que la base acepta. El resultado exitoso incluye el slug definitivo para que el panel lo muestre.
 
-```json
-{ "ok": true, "data": { "slug": "mi-articulo-2" } }
-```
+**No crear redirección desde el slug original.** Si el slug original ya lo ocupa otro artículo (porque se creó tras el borrado), no se crea ninguna redirección. Crearla apropiaría la URL del artículo nuevo. El panel muestra el slug definitivo y el autor decide si actualiza enlaces internos manualmente.
 
 ### `purgeArticle({ id, confirmSlug })`
 
@@ -247,6 +245,8 @@ La respuesta:
 La subida pasa por `@vercel/blob` (`put`) desde el servidor. El token se resuelve con OIDC en Vercel; en desarrollo local se usa `BLOB_READ_WRITE_TOKEN`.
 
 La clave del objeto es `articles/<uuid>.webp` o `games/<uuid>.webp`: nunca el nombre original ni el slug. Se guarda con `cacheControlMaxAge: 31536000` (caché larga; el contenido nunca cambia porque la clave lleva UUID).
+
+**Compensación de subida.** Si falla el `INSERT` en `media` después de subir a Blob, se intenta borrar los objetos de Blob y se registra la clave en un mecanismo de reconciliación para limpieza posterior. No hay transacción distribuida.
 
 ### 5.2 `POST /api/revalidate`
 

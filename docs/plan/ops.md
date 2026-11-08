@@ -61,12 +61,10 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 | `IP_HASH_SECRET` | Sí | Secreto del HMAC que hashea IPs |
 | `PUBLIC_SITE_URL` | Sí | Origen de producción |
 | `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
-| `IMAGES_PUBLIC_BASE_URL` | Sí | Dominio público de imágenes |
+| `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
 | `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
-| `BLOB_STORE_ID` | Sí | ID del store de Vercel Blob |
-| `BLOB_READ_WRITE_TOKEN` | Sí | Token de lectura/escritura para desarrollo local y CI |
-| `IP_HASH_SECRET` | Sí | Secreto del HMAC que hashea IPs |
-| `PUBLIC_SITE_URL` | Sí | Origen de producción |
+| `BLOB_STORE_ID` | Sí | ID del store de Vercel Blob (usado con OIDC en producción) |
+| `BLOB_READ_WRITE_TOKEN` | No | Token de lectura/escritura para desarrollo local y CI; en producción se usa OIDC |
 | `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
 | `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
 | `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
@@ -134,14 +132,18 @@ Se revisan en el PR y se ejecutan **manualmente**, nunca en el build de Vercel.
 
 Neon Free no incluye backups automáticos. La ventana de restauración de ~6 horas complementa, no reemplaza.
 
+**Destino del backup:** GitHub Actions artifacts. Son gratuitos en repos públicos, cuentan contra los 500 MB de almacenamiento de Actions de GitHub Free, y expiran tras 90 días. Para Netti (volumen bajo), alcanzan. No hay tarjeta ni proveedor extra.
+
 Workflow nocturno:
 
 1. Instalar `postgresql-client-17` desde PGDG (el runner no lo trae y `pg_dump` falla si el cliente es más viejo que el servidor).
 2. `pg_dump --format=custom --no-owner --exclude-table-data=sessions --exclude-table-data=login_attempts` contra `DATABASE_URL_UNPOOLED`.
 3. Cifrar con `age`.
-4. Subir a un bucket de backups con un token distinto y alcance mínimo.
-5. Retención de 30 días.
+4. Subir como artifact de GitHub Actions (`actions/upload-artifact`).
+5. Retención de 90 días (límite de GitHub); suficiente para la política de 30 días.
 6. Verificar el dump **antes** de darlo por bueno (ver checklist).
+
+**Límite conocido:** 500 MB de almacenamiento de Actions compartido en la cuenta. Si los dumps crecen demasiado, habrá que rotar más agresivamente o buscar otro destino gratuito. No hay factura sorpresa: se deja de poder subir, no se paga el exceso.
 
 **Checklist de integridad del backup.** Un dump que termina con código 0 puede estar incompleto o no ser restaurable:
 

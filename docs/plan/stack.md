@@ -45,6 +45,11 @@ Tecnologías, organización de las piezas y registro de decisiones. Revisado con
 | Suspensión por inactividad | 5 minutos |
 | Cómputo mínimo | 0,25 CU |
 | Ventana de restauración | ~6 horas |
+| Historial de restauración | 6 horas, hasta 1 GB de cambios |
+
+Algunos sitios de terceros citan 0,5 GB y 50 CU-horas; la documentación oficial de Neon (noviembre de 2026) confirma **1 GB y 100 CU-horas por proyecto**. El almacenamiento total de la cuenta no debe exceder 20 GB entre todos los proyectos Free. Estos valores se confirman en la consola antes de desplegar.
+
+**El riesgo real**: al agotar las 100 CU-horas, Neon **suspende el cómputo hasta el mes siguiente**. No degrada: se cae. Con 0,25 CU de mínimo, 100 CU-horas equivalen a unas 400 horas despierto, o sea ~55 % del mes.
 
 **El riesgo real**: al agotar las 100 CU-horas, Neon **suspende el cómputo hasta el mes siguiente**. No degrada: se cae. Con 0,25 CU de mínimo, 100 CU-horas equivalen a unas 400 horas despierto, o sea ~55 % del mes.
 
@@ -82,6 +87,18 @@ export async function getArticle(kind, slug) {
 | `updateTag(tag)` | Expira ya y garantiza lectura de lo escrito | **Solo Server Actions** |
 
 Las mutaciones del panel son Server Actions, así que usan `updateTag`. El autor ve su cambio publicado al volver al sitio, sin esperar la segunda visita.
+
+**Caché: lo que no está garantizado.** `"use cache"` es almacenamiento en memoria. En entornos serverless no es seguro que persista entre invocaciones ni que se comparta entre instancias; `cacheLife("max")` no convierte la caché local en almacenamiento remoto compartido. Para una caché distribuida real se necesita `use cache: remote` con un handler, que tiene coste y latencia asociados.
+
+Por tanto, la frase de `README.md` —"la lectura pública no despierta la base"— no está demostrada solo por usar Cache Components. Se debe:
+
+1. Prerenderizar las páginas públicas que se conozcan durante el build cuando sea viable.
+2. Separar el shell estático de las consultas realmente dinámicas.
+3. Probar explícitamente `use cache` en el despliegue real (Fase 0).
+4. Si el contenido depende de caché compartida en runtime, evaluar `use cache: remote`, estudiando su costo y latencia.
+5. Mantener una alternativa de lectura estática que no dependa de una conexión a Neon para las páginas ya generadas.
+
+Este punto es un bloqueante de la Fase 0: sin esta prueba, no apruebo la arquitectura de producción.
 
 **Invalidación granular**: una función pura `affectedTags(before, after)` devuelve los tags de la entrada, del listado del `kind`, de las etiquetas **viejas y nuevas**, y `home` solo si cambió `status`, `published_at`, `featured` o la portada. Corregir una tilde no invalida la portada.
 
@@ -148,7 +165,7 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 ### 1.6 Autenticación
 
 - Sin tabla `users`. Contraseña como hash `scrypt` en `ADMIN_PASSWORD_HASH`, formato `scrypt:131072:8:1:<saltB64>:<hashB64>`. El primer número es **N real** (2^17), no una constante de formato. **Separador `:`, no `$`**: Next expande `$VAR` en los archivos `.env` y corrompería el hash.
-- `crypto.scrypt` **asíncrono** (no `scryptSync`, que bloquea el event loop). Parámetros según OWASP: N=2^17, r=8, p=1, con `maxmem` explícito. Cada verificación consume ~128 MiB: el rate limit por IP se aplica **antes** de derivar, y se limita la concurrencia. Si en Vercel no entra con holgura, se baja N con el motivo documentado en un ADR, no en silencio.
+- `crypto.scrypt` **asíncrono** (no `scryptSync`, que bloquea el event loop). Parámetros según OWASP: N=2^17, r=8, p=1, con `maxmem` explícito. Cada verificación consume ~128 MiB: el rate limit por IP se aplica **antes** de derivar, y se limita la concurrencia con un semáforo local. Si en Vercel no entra con holgura, se baja N con el motivo documentado en un ADR, no en silencio.
 - `timingSafeEqual` solo después de comparar longitudes: lanza si los buffers difieren.
 - Token aleatorio de 256 bits; en `sessions` se guarda su hash SHA-256. Sin firma: la entropía alcanza y la firma no agrega nada. El token se genera **en el login**; no existe sesión anónima que se reutilice.
 - Cookie `HttpOnly`, `Secure`, `SameSite=Lax`. 8 horas deslizantes **con tope absoluto de 30 días**.
@@ -158,8 +175,11 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 - `ip_hash` es HMAC con un secreto, no SHA-256 plano (una IPv4 se revierte por fuerza bruta). Retención de 7 días; el secreto se puede rotar sin perder nada porque los intentos viejos ya no importan.
 - "Cerrar todas las sesiones" = `TRUNCATE sessions`.
 - `proxy.ts` redirige; `lib/auth.ts` verifica en cada lectura y escritura. El proxy no es una barrera de seguridad.
-- Mutaciones: `SameSite=Lax` + `Origin`/`Referer` comparados por **origen completo** (esquema y puerto, no sufijo) contra una allowlist + `Content-Type: application/json`. Se rechaza si faltan ambos headers. En previews, el host permitido se valida contra el proyecto de Vercel, no se acepta cualquier `VERCEL_BRANCH_URL` que llegue.
-- `SameSite=Lax` y la comprobación de origen son la defensa; la CSP y el saneado de Markdown son capas distintas, no sustitutos.
+- Mutaciones: `SameSite=Lax` + `Origin`/`Referer` comparados por **origen completo** (esquema y puerto, no sufijo) contra una allowlist. En previews, el host permitido se valida contra el proyecto de Vercel, no se acepta cualquier `VERCEL_BRANCH_URL` que llegue.
+
+  **No exigir `Content-Type: application/json` en Server Actions.** Ese header es propio de APIs JSON convencionales y no se aplica de forma universal al protocolo de Server Actions de Next.js; imponerlo podría rechazar peticiones legítimas del panel (por ejemplo, enviadas desde un formulario). Next.js ya incorpora comprobación de `Origin` contra `Host`/`X-Forwarded-Host`. Se mantienen controles de origen para operaciones sensibles y controles de Content-Type específicos en los Route Handlers que realmente reciben JSON.
+
+  `SameSite=Lax` y la comprobación de origen son la defensa; la CSP y el saneado de Markdown son capas distintas, no sustitutos.
 
 ### 1.7 Markdown y salida
 
@@ -252,7 +272,6 @@ netti/
 │   ├── images.ts                  # sharp + variantes
 │   ├── storage.ts                 # put/delete (Blob)
 │   ├── validation.ts              # makeArticleSchema(baseUrl)
-│   └── r2.ts
 ├── public/fonts/
 ├── proxy.ts
 ├── next.config.ts

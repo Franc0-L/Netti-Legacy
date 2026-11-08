@@ -123,7 +123,7 @@ Modal con la plantilla real: cabecera, ancho, tipografía, JSON-LD. `Esc` cierra
 1. Confirmación con el título.
 2. Pasa a `trashed` guardando el estado anterior y la fecha. El slug queda libre.
 3. Papelera: recuperar o eliminar definitivamente.
-4. **Recuperar con slug ocupado**: el servidor reintenta con `-2`, `-3`… hasta 10 veces y devuelve el slug definitivo. El panel no lo pide antes ni lo elige: muestra "Se recuperó como `mi-articulo-2`" y crea la redirección desde `/…/mi-articulo`.
+4. **Recuperar con slug ocupado**: el servidor reintenta con `-2`, `-3`… hasta 10 veces y devuelve el slug definitivo. El panel no lo pide antes ni lo elige: muestra "Se recuperó como `mi-articulo-2`". Si el slug original lo ocupa otro artículo, **no se crea redirección** desde él (apropiaría la URL del artículo nuevo).
 5. Purgar exige escribir el slug y sigue el orden mark-and-sweep: primero se marca y se borra la fila, después el objeto en Blob. Si Blob falla, la imagen queda pendiente y se reintenta; el artículo ya no está.
 
 ### 7.8 Historial

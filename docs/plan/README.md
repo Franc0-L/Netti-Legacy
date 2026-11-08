@@ -10,7 +10,7 @@ Plan de reconstrucción de Netti. Es la referencia para cualquier persona o agen
 | `stack.md` | Stack, arquitectura y decisiones D-001 a D-022. |
 | `content.md` | Esquema SQL, restricciones y validación con Zod. |
 | `ui.md` | Paleta, panel y flujo editorial. |
-| `api.md` | Server Actions y los Route Handlers (`upload`, `revalidate`, `health`). |
+| `api.md` | Server Actions y los Route Handlers (`upload`, `revalidate`, `health`, `ready`). |
 | `ops.md` | Git, entorno, backups, despliegue y hoja de ruta. |
 
 ## Qué es Netti

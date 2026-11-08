@@ -74,6 +74,8 @@ create or replace function validate_redirect()
 returns trigger
 language plpgsql
 as $$
+declare
+  cycle_found boolean;
 begin
   -- Evita recursión: el UPDATE de abajo vuelve a disparar este trigger
   if pg_trigger_depth() > 1 then
@@ -83,6 +85,31 @@ begin
   if new.from_path = new.to_path then
     raise exception 'La redirección apunta a sí misma.' using errcode = '23514';
   end if;
+
+  -- Rutas internas absolutas: empiezan por '/' seguido de un carácter no '/',
+  -- no contienen '//' (rechaza '//evil.com' y rutas relativas).
+  if new.from_path !~ '^/[^/][^ ]*$'
+     or new.to_path !~ '^/[^/][^ ]*$'
+     or new.from_path like '%//%'
+     or new.to_path like '%//%' then
+    raise exception 'Las rutas de redirección deben ser internas absolutas.' using errcode = '23514';
+  end if;
+
+  -- Detección de ciclos mediante CTE recursiva: seguir la cadena desde new.to_path
+  -- hasta encontrar new.from_path. Si se llega, hay un ciclo de cualquier longitud.
+  select exists (
+    with recursive chain as (
+      select to_path from redirects where from_path = new.to_path
+      union all
+      select r.to_path from chain c join redirects r on r.from_path = c.to_path
+    )
+    select 1 from chain where to_path = new.from_path
+  ) into cycle_found;
+
+  if cycle_found then
+    raise exception 'La redirección crearía un ciclo.' using errcode = '23514';
+  end if;
+
   -- Evita el ciclo directo A→B / B→A
   delete from redirects
    where from_path = new.to_path and to_path = new.from_path;
@@ -162,6 +189,7 @@ create table articles (
   tags             text[] not null default '{}',
   cover_image_url  text,
   cover_alt        text,
+  cover_media_id   integer references media (id) on delete set null,
   status           content_status not null default 'draft',
   previous_status  content_status,
   trashed_at       timestamptz,
@@ -185,6 +213,7 @@ create table articles (
   seo_title        text,
   seo_description  text,
   og_image_url     text,
+  og_media_id      integer references media (id) on delete set null,
 
   -- Formato
   constraint articles_title_len
@@ -198,7 +227,8 @@ create table articles (
   constraint articles_source_url
     check (source_url is null or source_url ~* '^https?://'),
   constraint articles_cover_alt_required
-    check (cover_image_url is null or char_length(btrim(coalesce(cover_alt, ''))) > 0),
+    check ((cover_image_url is null and cover_media_id is null)
+           or char_length(btrim(coalesce(cover_alt, ''))) > 0),
 
   -- Estados
   constraint articles_published_requires_date
@@ -248,7 +278,8 @@ create index articles_featured_idx
 
 create index articles_tags_idx on articles using gin (tags);
 
--- Publicaciones programadas: el job de revalidación solo mira este subconjunto
+-- Índice para consultar publicaciones por fecha. Incluye todas las publicadas
+-- (pasadas y futuras); el job de revalidación filtra las que ya cruzaron la hora.
 create index articles_pending_activation_idx
   on articles (published_at)
   where status = 'published';
@@ -332,6 +363,32 @@ create table media (
   constraint media_single_owner
     check (num_nonnulls(article_id, game_id) <= 1)
 );
+
+-- FK circular: articles -> media (cover_media_id, og_media_id) y media -> articles (article_id).
+-- Para insertar, se hace en dos pasos: primero el artículo con media_id null, luego el medio,
+-- y finalmente se actualiza el artículo con el media_id. PostgreSQL permite FK circulares con
+-- ON DELETE SET NULL, pero no en una sola sentencia.
+
+-- Evita reasignar un medio marcado para borrado (condición de carrera en mark-and-sweep).
+create or replace function protect_media_during_purge()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.pending_delete_at is not null
+     and (new.article_id is distinct from old.article_id
+          or new.game_id is distinct from old.game_id) then
+    raise exception 'No se puede reasignar un medio marcado para eliminación.' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger media_protect_during_purge
+  before update on media
+  for each row
+  when (old.pending_delete_at is not null)
+  execute function protect_media_during_purge();
 
 create index media_pending_delete_idx
   on media (pending_delete_at)
@@ -423,7 +480,7 @@ create table redirects (
   status_code  smallint not null default 301 check (status_code in (301, 302, 308)),
   created_at   timestamptz not null default now(),
   constraint redirects_absolute_paths
-    check (from_path ~ '^/[^/]' and to_path ~ '^/[^/]'),
+    check (from_path ~ '^/[^/][^ ]*$' and to_path ~ '^/[^/][^ ]*$'),
   constraint redirects_not_self
     check (from_path <> to_path)
 );
@@ -559,6 +616,15 @@ El servidor valida, en este orden: tamaño declarado (como pista), tamaño real,
 
 **GIF queda fuera.** La salida es WebP estático y `sharp` descartaría los fotogramas en silencio. Aceptar el formato para luego romper la animación es peor que rechazarlo con un mensaje claro. Si algún día se necesitan animaciones, se decide y se implementa entonces.
 
+**Compensación de subida (saga).** No hay transacción distribuida entre Blob y PostgreSQL. El flujo es:
+
+1. Subir objetos a Blob (original + variantes).
+2. Insertar metadatos en `media` y `media_variants` dentro de una transacción.
+3. Si la transacción falla, intentar borrar los objetos de Blob subidos.
+4. Si la compensación falla, registrar las claves en un mecanismo de reconciliación (job de baja frecuencia que compara `media.storage_key` con el store de Blob y reporta huérfanos).
+
+No se puede tratar como una sola operación atómica; hay que asumir fallos parciales y tener un camino de recuperación.
+
 ---
 
 ## 4. Estados y transiciones
@@ -602,7 +668,7 @@ Toda consulta pública usa este helper. No se escribe la condición a mano en ni
 - SVG rechazado. GIF rechazado (la salida es estática). AVIF acepta las marcas `avif`, `avis` y `mif1` con `avif` compatible.
 - Tope de 2 MB en la subida, pero el cliente **redimensiona antes** a WebP: una captura PNG de 1080p supera los 2 MB con facilidad.
 - **Imágenes del cuerpo**: el Markdown guarda `![alt](media:12)`, nunca una URL pegada. Un plugin de remark resuelve el id, obtiene dimensiones y variantes de `media`, y genera `<img srcset sizes width height>`. Así se evita CLS, la purga sabe qué medios referencia el cuerpo y una URL mal copiada no rompe la imagen.
-- Borrar un artículo no borra sus imágenes (papelera). La purga definitiva sí, siguiendo el orden mark-and-sweep de §2.4. Blob no tiene concepto de "pendiente de eliminación" a nivel de bucket; la marca vive en Postgres y el sweeper lee esa tabla para saber qué borrar de Blob.
+- Borrar un artículo no borra sus imágenes (papelera). La purga definitiva sí, siguiendo el orden mark-and-sweep de §2.4. Blob no tiene concepto de "pendiente de eliminación" al nivel del store; la marca vive en Postgres y el sweeper lee esa tabla para saber qué borrar de Blob.
 
 ---
 
