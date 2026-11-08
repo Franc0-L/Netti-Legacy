@@ -60,18 +60,18 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 | `ADMIN_PASSWORD_HASH` | Sí | `scrypt:131072:8:1:<saltB64>:<hashB64>` |
 | `IP_HASH_SECRET` | Sí | Secreto del HMAC que hashea IPs |
 | `PUBLIC_SITE_URL` | Sí | Origen de producción |
-| `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
+| `PREVIEW_ORIGIN_REGEX` | No | Patrón de origen permitido en previews, anclado al dominio del proyecto (no aceptar subdominios arbitrarios) |
 | `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
 | `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
-| `BLOB_STORE_ID` | Sí | ID del store de Vercel Blob (usado con OIDC en producción) |
+| `AGE_PUBLIC_KEY` | Sí | Clave pública `age` para cifrar el dump de backup |
+**Custodia de la clave `age`**: la clave pública (`AGE_PUBLIC_KEY`) se usa para cifrar el backup en GitHub Actions. La clave privada (`AGE_PRIVATE_KEY`) se conserva fuera del repo y fuera de GitHub Actions (por ejemplo, en el gestor de contraseñas del autor o un secreto de entorno protegido), y se usa solo para la restauración mensual de prueba. Si se pierde, el backup cifrado no se puede recuperar.
+| `BLOB_STORE_ID` | No | ID del store de Vercel Blob (OIDC en Vercel suele proveerlo automáticamente; confirmar si el código lo usa realmente) |
 | `BLOB_READ_WRITE_TOKEN` | No | Token de lectura/escritura para desarrollo local y CI; en producción se usa OIDC |
-| `PREVIEW_ORIGIN_REGEX` | No | Orígenes permitidos en previews |
-| `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
-| `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
+| `SITE` | Sí | Origen público usado por el cron de revalidación (`https://netti.vercel.app`). |
 
 **El separador del hash es `:`, no `$`.** Next expande `$VAR` en los archivos `.env`; un hash con `$` queda corrupto y el login falla sin explicación.
 
-**Previews**: `PUBLIC_SITE_URL` es fijo, así que el panel en un preview rechazaría el login con `403`. La verificación de origen compara contra `PUBLIC_SITE_URL` **más** `PREVIEW_ORIGIN_REGEX` (o `VERCEL_BRANCH_URL`).
+**Previews**: `PUBLIC_SITE_URL` es fijo, así que el panel en un preview rechazaría el login con `403`. La verificación de origen compara el `Origin` normalizado contra `PUBLIC_SITE_URL` **o** contra `PREVIEW_ORIGIN_REGEX` (patrón anclado al dominio de Vercel, por ejemplo `https://.*-netti\.vercel\.app`). No se acepta cualquier `VERCEL_BRANCH_URL` que llegue: el host permitido se valida contra el proyecto de Vercel configurado.
 
 **Dos URLs de base**: el pooler no sirve para migraciones ni para `pg_dump`, y `CREATE INDEX CONCURRENTLY` falla a través de él.
 
@@ -84,9 +84,12 @@ DATABASE_URL_UNPOOLED=postgresql://...@...sa-east-1.aws.neon.tech/netti?sslmode=
 ADMIN_PASSWORD_HASH=scrypt:131072:8:1:
 IP_HASH_SECRET=
 CRON_SECRET=
+SITE=https://netti.vercel.app
 
 PUBLIC_SITE_URL=http://localhost:3000
+PREVIEW_ORIGIN_REGEX=https://.*-netti\.vercel\.app
 IMAGES_PUBLIC_BASE_URL=https://ce0rcu23vrrdzqap.public.blob.vercel-storage.com
+AGE_PUBLIC_KEY=age1...
 
 BLOB_STORE_ID=
 BLOB_READ_WRITE_TOKEN=
@@ -143,7 +146,7 @@ Workflow nocturno:
 5. Retención de 90 días (límite de GitHub); suficiente para la política de 30 días.
 6. Verificar el dump **antes** de darlo por bueno (ver checklist).
 
-**Límite conocido:** 500 MB de almacenamiento de Actions compartido en la cuenta. Si los dumps crecen demasiado, habrá que rotar más agresivamente o buscar otro destino gratuito. No hay factura sorpresa: se deja de poder subir, no se paga el exceso.
+**Límite conocido:** 500 MB de almacenamiento de Actions compartido en la cuenta. GitHub Free también incluye 2.000 minutos mensuales de runners privados. Si los dumps crecen demasiado, habrá que rotar más agresivamente o buscar otro destino gratuito. No hay factura sorpresa: se deja de poder subir, no se paga el exceso. Estos límites se verifican en la cuenta/plan actual y se confirman con un artifact de prueba; no se asumen como permanentes.
 
 **Checklist de integridad del backup.** Un dump que termina con código 0 puede estar incompleto o no ser restaurable:
 

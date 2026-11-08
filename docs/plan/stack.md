@@ -6,12 +6,12 @@ Tecnologías, organización de las piezas y registro de decisiones. Revisado con
 
 | Capa | Tecnología |
 |------|-----------|
-| Framework | Next.js 16.4.x (App Router, TypeScript estricto, Turbopack) |
+| Framework | Next.js 16.4.5 (App Router, TypeScript estricto, Turbopack) |
 | Estilos | Tailwind CSS v4 con tokens en CSS |
 | Base de datos | Neon (PostgreSQL serverless), plan Free |
 | Acceso a datos | Drizzle ORM sobre `pg` (node-postgres) |
 | Mutaciones | Server Actions |
-| Endpoints HTTP | Route Handlers solo para `upload` y revalidación programada |
+| Endpoints HTTP | Route Handlers solo para `upload`, `revalidate`, `health` y `ready` |
 | Imágenes | Vercel Blob + `sharp` (variantes y re-encodeo) |
 | Markdown | `remark` + `remark-gfm` + `rehype` + `rehype-sanitize` |
 | Validación | Zod 4 |
@@ -272,6 +272,8 @@ netti/
 │   ├── images.ts                  # sharp + variantes
 │   ├── storage.ts                 # put/delete (Blob)
 │   ├── validation.ts              # makeArticleSchema(baseUrl)
+│   ├── storage.ts                 # put/delete (Blob)
+│   └── seo.ts                     # safeJsonLd, safeCdata
 ├── public/fonts/
 ├── proxy.ts
 ├── next.config.ts
@@ -286,6 +288,10 @@ netti/
 3. Si no, Drizzle consulta Neon y el resultado queda cacheado con `cacheLife('max')`.
 4. Markdown → HTML sanitizado.
 5. SEO, canonical, JSON-LD.
+
+**Medición de caché.** `x-vercel-cache` evidencia caché de respuesta de ruta/CDN, no necesariamente que la lectura de datos no haya consultado Neon. Para validar que la lectura pública no despierta la base se mide por separado:
+- Generación estática / ISR: `x-vercel-cache` y ausencia de CU-h en Neon.
+- Lectura de datos con `use cache` runtime: CU-h de Neon antes y después de visitas repetidas.
 
 Si el artículo no existe, **recién ahí** se consulta el mapa de `redirects` (cacheado bajo el tag `redirects`) y se responde 308. Nunca en el proxy ni en cualquier URL arbitraria.
 
@@ -308,15 +314,72 @@ Invalidar antes de confirmar publica un estado que todavía puede revertirse.
 - Sin API pública.
 - Sin duplicar lógica entre Server Actions y Route Handlers.
 
----
+### 2.5 Contratos de `lib/`
+
+Estos contratos están listados aquí para que la implementación no parta de cero:
+
+**`lib/storage.ts`** — abstrae el proveedor de archivos (hoy Vercel Blob):
+
+```ts
+export interface StoredObject {
+  key: string;          // articles/<uuid>.webp, nunca slug ni nombre original
+  url: string;          // pública, derivada de la respuesta de Blob
+  bytes: number;
+}
+
+export interface Storage {
+  put(
+    key: string,
+    body: ReadableStream | Blob | ArrayBuffer,
+    options: {
+      contentType: string;
+      cacheControlMaxAge: number;
+    },
+  ): Promise<StoredObject>;
+  del(keys: string[]): Promise<void>;
+}
+```
+
+- `put` usa claves exactas (`addRandomSuffix: false`) para que el `key` sea estable y el `url` predecible.
+- `del` es idempotente; si falla alguna variante, se registra en `storage_orphans` para reconciliación posterior.
+- Credenciales: OIDC en Vercel (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`), `BLOB_READ_WRITE_TOKEN` en desarrollo local y CI.
+
+**`lib/seo.ts`**:
+
+```ts
+export function safeJsonLd(value: unknown): string;
+export function safeCdata(value: string): string;
+```
+
+- `safeJsonLd`: `JSON.stringify(value)` y sustitución de `<`, `>`, `&` por secuencias `\uXXXX` antes de inyectar en `<script type="application/ld+json">`. Fallá controlado si hay referencias cíclicas; nunca emite texto parcial.
+- `safeCdata`: rechaza o escapa `]]>` en CDATA de RSS.
+
+**`lib/validation.ts`**:
+
+```ts
+export function makeArticleSchema(imagesBaseUrl: string): z.ZodType<ArticleInput, any, any>;
+export type ArticleInput = z.infer<ReturnType<typeof makeArticleSchema>>;
+export function isUniqueViolation(error: unknown, constraintName: string): boolean;
+export function requireSession(): Promise<Session>;
+export function assertSameOrigin(origin?: string): void;
+```
+
+**`lib/content.ts`**:
+
+```ts
+export function visibleArticle(now?: Date): SQL;
+export function affectedTags(before: ArticleTagState | null, after: ArticleTagState | null): string[];
+```
+
+--- 
 
 ## 3. Decisiones
 
 Cada decisión tiene dos planos: **qué se eligió** y **cuánto está probado**. Las que dependen de infraestructura no verificada llevan `Validación: pendiente` y se confirman en la Fase 0. Presentar una hipótesis como propiedad confirmada es justamente lo que hay que evitar.
 
-### D-001: Next.js 16
+### D-001: Next.js 16.4.5
 
-16.4.x, no 15: 15 está en Maintenance LTS, `next lint` desapareció y Cache Components es el modelo nuevo. **Aceptada.**
+16.4.5, no 15: 15 está en Maintenance LTS, `next lint` desapareció y Cache Components es el modelo nuevo. **Aceptada.**
 
 ### D-002: Neon (PostgreSQL)
 

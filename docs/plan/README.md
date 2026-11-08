@@ -30,7 +30,7 @@ Blog editorial de videojuegos en español, de un solo autor, con reseñas (puntu
 
 - **La mejor herramienta gana**, aunque obligue a rehacer algo. No se defiende una decisión por haberla tomado antes.
 - **Un solo repositorio.** El contenido vive en Postgres, no en archivos.
-- **La lectura pública no despierta la base.** Es un requisito operativo, no una optimización: Neon Free suspende el cómputo al agotar las CU-horas.
+- **La lectura pública no despierta la base.** Es un **objetivo de Fase 0**, no una garantía ya probada: `use cache` no asegura persistencia compartida entre instancias serverless. Se verifica con `x-vercel-cache` y consumo de CU-h antes de considerar la arquitectura lista para producción.
 - **La base impone lo que puede imponer.** `CHECK`, índices parciales y claves foráneas, además de Zod.
 - **Backups obligatorios** desde la Fase 3, con restauración probada.
 - **Morado** (`#a78bfa`, `#c9bbff`, `#5b21b6`) en sitio y panel.
@@ -48,11 +48,14 @@ Cada afirmación de infraestructura lleva su grado de certeza. Sin esto, una hip
 | **Diferida** | Se sabe que hace falta, pero no en la primera versión. |
 | **Descartada** | Se evaluó y se rechazó, con el motivo escrito. |
 
-## Decisiones abiertas
+## Decisiones y validaciones pendientes
 
-1. **Vercel Blob + subida por servidor.** Decidida: costo cero real en Hobby, sin tarjeta ni dominio propio. `lib/storage.ts` aísla `put`/`del` para poder migrar si algún día se justifica.
-2. **`scrypt` con N=2^17 en Vercel.** Consume ~128 MiB por verificación. Si el spike muestra problemas de memoria o latencia, se baja N con un ADR que lo justifique.
-3. **Cron de revalidación.** GitHub Actions hoy; Vercel Schedules cuando salga de beta con condiciones aceptables.
+| # | Decisión | Estado | Qué se valida en Fase 0 |
+|---|----------|--------|-------------------------|
+| 1 | **Vercel Blob + subida por servidor.** `lib/storage.ts` aísla `put`/`del` para poder migrar si algún día se justifica. | Decidida | Subida real de 2 MB, cuatro objetos, compensación si falla `INSERT` en media. |
+| 2 | **`scrypt` con N=2^17 en Vercel.** Consume ~128 MiB por verificación. Si el spike muestra problemas de memoria o latencia, se baja N con un ADR que lo justifique. | Decidida con validación pendiente | Latencia p50/p95, memoria máxima, concurrencia de verificaciones. |
+| 3 | **Cron de revalidación.** GitHub Actions hoy; Vercel Schedules cuando salga de beta con condiciones aceptables. | Decidida | Endpoint idempotente, `activated_at`, retraso acotado. |
+| 4 | **Caché pública con `"use cache"` + `cacheLife("max")`.** | Validación: pendiente | `x-vercel-cache` en visitas repetidas y lectura sin consultas a Neon. |
 
 ## Estado
 

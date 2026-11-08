@@ -139,13 +139,38 @@ Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $vers
 
 `published` → `draft`. Conserva `published_at` para no perder la fecha original. Revalida.
 
+```ts
+async function unpublishArticle(args: {
+  id: number;
+  version: number;
+}): Promise<ActionResult<{ version: number; status: "draft" }>>;
+```
+
+Invalidación: `article:<kind>:<slug>`, `kind:<kind>`, `articles`, `home`.
+
 ### `trashArticle({ id, version })`
 
-Guarda `previous_status` y `trashed_at`, pone `status = 'trashed'`. Libera el slug (índice parcial). No borra imágenes.
+`published` o `draft` → `trashed`. Guarda `previous_status` y `trashed_at`, pone `status = 'trashed'`. Libera el slug (índice parcial). No borra imágenes.
 
-### `restoreArticle({ id })`
+```ts
+async function trashArticle(args: {
+  id: number;
+  version: number;
+}): Promise<ActionResult<{ version: number; status: "trashed" }>>;
+```
+
+Invalidación: `article:<kind>:<slug>`, `kind:<kind>`, `articles`, `home` si estaba publicado o destacado, `tag:<t>` para cada etiqueta previa.
+
+### `restoreArticle({ id, version })`
 
 Vuelve a `previous_status` y limpia `trashed_at`. **No hay pre-chequeo**: comprobar si el slug está libre antes del `UPDATE` es una condición de carrera. Se intenta el `UPDATE` y se captura la violación de unicidad.
+
+```ts
+async function restoreArticle(args: {
+  id: number;
+  version: number;
+}): Promise<ActionResult<{ version: number; status: ContentStatus; slug: string }>>;
+```
 
 Dos detalles que un `catch (23505)` genérico no resuelve:
 
@@ -168,9 +193,19 @@ Cada reintento es un `UPDATE`; el que gana es el que la base acepta. El resultad
 
 **No crear redirección desde el slug original.** Si el slug original ya lo ocupa otro artículo (porque se creó tras el borrado), no se crea ninguna redirección. Crearla apropiaría la URL del artículo nuevo. El panel muestra el slug definitivo y el autor decide si actualiza enlaces internos manualmente.
 
-### `purgeArticle({ id, confirmSlug })`
+Invalidación: `article:<kind>:<slug-original>`, `article:<kind>:<slug-definitivo>`, `kind:<kind>`, `articles`, `home` si el estado restaurado es publicado o destacado.
+
+### `purgeArticle({ id, version, confirmSlug })`
 
 Borrado definitivo. Exige escribir el slug para confirmar.
+
+```ts
+async function purgeArticle(args: {
+  id: number;
+  version: number;
+  confirmSlug: string;
+}): Promise<ActionResult<{ version: number }>>;
+```
 
 **Orden mark-and-sweep** (Postgres y Blob no comparten transacción):
 
@@ -179,6 +214,8 @@ Borrado definitivo. Exige escribir el slug para confirmar.
 3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
 
 Si el paso 2 falla, la fila queda marcada y un barrido de baja frecuencia reintenta. Nunca se borra el objeto antes de confirmar la base: eso deja referencias rotas que no se pueden reparar. Las imágenes referenciadas por otro artículo no se marcan.
+
+Invalidación: `article:<kind>:<slug>`, `kind:<kind>`, `articles`, `home` si estaba publicado o destacado, `tag:<t>` para cada etiqueta previa, `redirects` si el artículo tenía redirecciones activas.
 
 ### `searchGames({ q, limit })`
 

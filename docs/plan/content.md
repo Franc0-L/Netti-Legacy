@@ -97,10 +97,11 @@ begin
 
   -- Detección de ciclos mediante CTE recursiva: seguir la cadena desde new.to_path
   -- hasta encontrar new.from_path. Si se llega, hay un ciclo de cualquier longitud.
+  -- Usa UNION (no UNION ALL) para garantizar terminación incluso con ciclos preexistentes.
   select exists (
-    with recursive chain as (
+    with recursive chain(to_path) as (
       select to_path from redirects where from_path = new.to_path
-      union all
+      union
       select r.to_path from chain c join redirects r on r.from_path = c.to_path
     )
     select 1 from chain where to_path = new.from_path
@@ -144,13 +145,15 @@ create table games (
   external_source  text check (external_source in ('rawg', 'igdb', 'manual')),
   external_id      text,
   status           content_status not null default 'draft',
-  cover_image_url  text,
+  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado, se sincroniza al escribir
   cover_alt        text,
+  cover_media_id   integer references media (id) on delete set null,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
   version          integer not null default 1,
   constraint games_cover_alt_required
-    check (cover_image_url is null or char_length(btrim(coalesce(cover_alt, ''))) > 0),
+    check ((cover_image_url is null and cover_media_id is null)
+           or char_length(btrim(coalesce(cover_alt, ''))) > 0),
   constraint games_published_requires_cover
     check (status <> 'published' or cover_image_url is not null)
 );
@@ -187,7 +190,7 @@ create table articles (
   published_at     timestamptz,
   author           text,
   tags             text[] not null default '{}',
-  cover_image_url  text,
+  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado, se sincroniza al escribir
   cover_alt        text,
   cover_media_id   integer references media (id) on delete set null,
   status           content_status not null default 'draft',
@@ -212,7 +215,7 @@ create table articles (
   -- SEO
   seo_title        text,
   seo_description  text,
-  og_image_url     text,
+  og_image_url     text,        -- URL pública derivada de og_media_id; caché derivado, se sincroniza al escribir
   og_media_id      integer references media (id) on delete set null,
 
   -- Formato
@@ -402,6 +405,22 @@ create table media_variants (
   bytes      integer not null,
   primary key (media_id, width, format)
 );
+
+-- Registro de compensación para subidas/borrados fallidos entre Blob y Postgres.
+-- Si falla el INSERT en media tras subir objetos, o falla un del de Blob, se anota
+-- aquí para que un job de baja frecuencia repare o reporte el desajuste.
+create table storage_orphans (
+  id          bigint generated always as identity primary key,
+  storage_key text not null,
+  action      text not null check (action in ('put', 'del')),
+  status      text not null default 'pending' check (status in ('pending', 'repaired', 'orphaned')),
+  created_at  timestamptz not null default now(),
+  repaired_at timestamptz
+);
+
+create index storage_orphans_pending_idx
+  on storage_orphans (status)
+  where status = 'pending';
 ```
 
 Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas huérfanas se acumulan. `credit`, `rights` y `source_url` documentan procedencia: una carátula disponible públicamente no es una carátula libre de derechos.
@@ -522,7 +541,8 @@ Comparar `origin` y no `startsWith` evita que `https://img.netti.example.evil.co
 Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe la URL del almacenamiento y construye `cover` una sola vez. El servidor la llama con `env.IMAGES_PUBLIC_BASE_URL`; el cliente, con el valor que expone el layout. Así no hay ningún `process.env` en código compartido. Los bloques de esta sección se leen como un solo módulo.
 
 ```ts
-const cover = imageUrlSchema(imagesBaseUrl);
+export function makeArticleSchema(imagesBaseUrl: string) {
+  const cover = imageUrlSchema(imagesBaseUrl);
 
 // Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
 const baseArticle = z.object({
@@ -536,6 +556,7 @@ const baseArticle = z.object({
   author: z.string().trim().max(60).nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
   coverImageUrl: cover,
+  coverMediaId: z.number().int().positive().nullable().optional(),
   coverAlt: z.string().trim().max(200).nullable().optional(),
   status: z.enum(["draft", "published", "trashed"]).default("draft"),
   publishedAt: z.coerce.date().nullable().optional(),
@@ -543,6 +564,7 @@ const baseArticle = z.object({
   seoTitle: z.string().trim().max(70).nullable().optional(),
   seoDescription: z.string().trim().max(160).nullable().optional(),
   ogImageUrl: cover,
+  ogMediaId: z.number().int().positive().nullable().optional(),
 });
 
 const reviewShape = baseArticle.extend({
@@ -596,13 +618,14 @@ const articleSchema = z
   });
 
 return articleSchema;
+}
 ```
 
 El `kind` es un literal por variante, así que `discriminatedUnion` estrecha el tipo: en `value.kind === "review"`, `gameId` y `score` existen en el tipo. Los campos de reseña son nullable para que un borrador incompleto sea válido; la exigencia aparece al publicar, en el mismo lugar que los `CHECK` de la base.
 
-`sourceUrl` usa la misma regla que el `CHECK` (`~*`), insensible a mayúsculas. Si Zod fuera más laxo, `HTTPS://x` pasaría la validación y fallaría en la base con un `500`.
+**Pendiente:** `makeGameSchema` para el CRUD de fichas de juegos (slug, portada, estado, plataformas, géneros). Se define antes de crear ese CRUD; no bloquea el MVP de reseñas.
 
-**Versión de Zod**: se fija Zod 4 en `package.json`. Si se usara Zod 3, el `superRefine` externo sigue siendo la forma correcta; no cambiar la estructura al migrar.
+`sourceUrl` usa la misma regla que el `CHECK` (`~*`), insensible a mayúsculas. Si Zod fuera más laxo, `HTTPS://x` pasaría la validación y fallaría en la base con un `500`.
 
 ### 3.2 Subida
 
@@ -647,13 +670,15 @@ Lo que sí necesita un job es **invalidar la caché** cuando llega la hora. Se r
 ### Predicado único de visibilidad
 
 ```ts
-export const visibleArticle = and(
-  eq(articles.status, "published"),
-  lte(articles.publishedAt, new Date()),
-);
+export function visibleArticle(now: Date = new Date()) {
+  return and(
+    eq(articles.status, "published"),
+    lte(articles.publishedAt, now),
+  );
+}
 ```
 
-Toda consulta pública usa este helper. No se escribe la condición a mano en ningún lado.
+`now` se pasa como parámetro para que cada consulta use un reloj fresco y los tests puedan fijarlo. Toda consulta pública usa este helper. No se escribe la condición a mano en ningún lado.
 
 ---
 
