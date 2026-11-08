@@ -293,6 +293,34 @@ netti/
 - Generación estática / ISR: `x-vercel-cache` y ausencia de CU-h en Neon.
 - Lectura de datos con `use cache` runtime: CU-h de Neon antes y después de visitas repetidas.
 
+**Contrato de `getArticle`**:
+
+```ts
+type ArticleKind = "review" | "news" | "guide";
+
+export async function getArticle(
+  kind: ArticleKind,
+  slug: string,
+): Promise<PublicArticle | null> {
+  "use cache";
+
+  cacheTag(`article:${kind}:${slug}`, `kind:${kind}`, "articles");
+  cacheLife("max");
+
+  const now = new Date();
+
+  return db.query.articles.findFirst({
+    where: and(
+      eq(articles.kind, kind),
+      eq(articles.slug, slug),
+      visibleArticle(now),
+    ),
+  });
+}
+```
+
+`now` se pasa como parámetro local, no como argumento de la función cacheada, para que cada consulta use un reloj fresco sin formar parte de la clave de caché.
+
 Si el artículo no existe, **recién ahí** se consulta el mapa de `redirects` (cacheado bajo el tag `redirects`) y se responde 308. Nunca en el proxy ni en cualquier URL arbitraria.
 
 El resolver es común a todas las rutas de contenido. Una URL que cambia de colección (`/resenas/juego-x` → `/juegos/juego-x`) se redirige igual, porque el mapa se consulta después de que la ruta de contenido no encontró la fila, no después de que el artículo exista en la colección anterior.
@@ -357,19 +385,56 @@ export function safeCdata(value: string): string;
 **`lib/validation.ts`**:
 
 ```ts
-export function makeArticleSchema(imagesBaseUrl: string): z.ZodType<ArticleInput, any, any>;
-export type ArticleInput = z.infer<ReturnType<typeof makeArticleSchema>>;
+export const makeArticleSchema = (imagesBaseUrl: string) => {
+  // ... construcción del discriminatedUnion ...
+  return articleSchema;
+};
+
+export type ArticleInput = z.input<ReturnType<typeof makeArticleSchema>>;
+export type ParsedArticle = z.output<ReturnType<typeof makeArticleSchema>>;
 export function isUniqueViolation(error: unknown, constraintName: string): boolean;
-export function requireSession(): Promise<Session>;
+export async function requireSession(): Promise<Session>;
 export function assertSameOrigin(origin?: string): void;
+```
+
+**`lib/tags.ts`**:
+
+```ts
+export type ArticleKind = "review" | "news" | "guide";
+export type ContentStatus = "draft" | "published" | "trashed";
+
+export interface ArticleTagState {
+  id: number;
+  kind: ArticleKind;
+  slug: string;
+  status: ContentStatus;
+  publishedAt: Date | null;
+  featured: boolean;
+  tags: string[];
+  title: string;
+  description: string;
+  coverMediaId: number | null;
+  gameId: number | null;
+}
+
+export function affectedTags(
+  before: ArticleTagState | null,
+  after: ArticleTagState | null,
+): string[];
 ```
 
 **`lib/content.ts`**:
 
 ```ts
-export function visibleArticle(now?: Date): SQL;
-export function affectedTags(before: ArticleTagState | null, after: ArticleTagState | null): string[];
+export function visibleArticle(now: Date = new Date()) {
+  return and(
+    eq(articles.status, "published"),
+    lte(articles.publishedAt, now),
+  );
+}
 ```
+
+El módulo `lib/tags.ts` es el único propietario de `affectedTags`; `lib/content.ts` no declara esa función.
 
 --- 
 

@@ -145,9 +145,9 @@ create table games (
   external_source  text check (external_source in ('rawg', 'igdb', 'manual')),
   external_id      text,
   status           content_status not null default 'draft',
-  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado, se sincroniza al escribir
+  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado
   cover_alt        text,
-  cover_media_id   integer references media (id) on delete set null,
+  cover_media_id   integer,     -- FK agregada con ALTER TABLE tras crear media
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
   version          integer not null default 1,
@@ -190,9 +190,9 @@ create table articles (
   published_at     timestamptz,
   author           text,
   tags             text[] not null default '{}',
-  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado, se sincroniza al escribir
+  cover_image_url  text,        -- URL pública derivada de cover_media_id; caché derivado
   cover_alt        text,
-  cover_media_id   integer references media (id) on delete set null,
+  cover_media_id   integer,     -- FK agregada con ALTER TABLE tras crear media
   status           content_status not null default 'draft',
   previous_status  content_status,
   trashed_at       timestamptz,
@@ -215,8 +215,8 @@ create table articles (
   -- SEO
   seo_title        text,
   seo_description  text,
-  og_image_url     text,        -- URL pública derivada de og_media_id; caché derivado, se sincroniza al escribir
-  og_media_id      integer references media (id) on delete set null,
+  og_image_url     text,        -- URL pública derivada de og_media_id; caché derivado
+  og_media_id      integer,     -- FK agregada con ALTER TABLE tras crear media
 
   -- Formato
   constraint articles_title_len
@@ -397,6 +397,21 @@ create index media_pending_delete_idx
   on media (pending_delete_at)
   where pending_delete_at is not null;
 
+-- FK circulares: games y articles apuntan a media. Se agregan con ALTER TABLE
+-- porque media se crea después de games y articles, y PostgreSQL no permite
+-- declarar una FK hacia una tabla que todavía no existe.
+alter table games
+  add constraint games_cover_media_fk
+  foreign key (cover_media_id) references media (id) on delete set null;
+
+alter table articles
+  add constraint articles_cover_media_fk
+  foreign key (cover_media_id) references media (id) on delete set null;
+
+alter table articles
+  add constraint articles_og_media_fk
+  foreign key (og_media_id) references media (id) on delete set null;
+
 create table media_variants (
   media_id   integer not null references media (id) on delete cascade,
   width      integer not null,
@@ -421,6 +436,16 @@ create table storage_orphans (
 create index storage_orphans_pending_idx
   on storage_orphans (status)
   where status = 'pending';
+
+-- Cursor de ejecución del job de revalidación programada. Permite recuperar
+-- publicaciones pendientes si una ejecución se retrasa o falla.
+create table cron_runs (
+  job_name         text not null primary key,
+  last_success_at  timestamptz,
+  last_run_at      timestamptz not null default now()
+);
+
+insert into cron_runs (job_name) values ('revalidate_scheduled') on conflict do nothing;
 ```
 
 Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas huérfanas se acumulan. `credit`, `rights` y `source_url` documentan procedencia: una carátula disponible públicamente no es una carátula libre de derechos.
@@ -541,7 +566,7 @@ Comparar `origin` y no `startsWith` evita que `https://img.netti.example.evil.co
 Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe la URL del almacenamiento y construye `cover` una sola vez. El servidor la llama con `env.IMAGES_PUBLIC_BASE_URL`; el cliente, con el valor que expone el layout. Así no hay ningún `process.env` en código compartido. Los bloques de esta sección se leen como un solo módulo.
 
 ```ts
-export function makeArticleSchema(imagesBaseUrl: string) {
+export const makeArticleSchema = (imagesBaseUrl: string) => {
   const cover = imageUrlSchema(imagesBaseUrl);
 
 // Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
@@ -618,8 +643,13 @@ const articleSchema = z
   });
 
 return articleSchema;
-}
+};
+
+export type ArticleInput = z.input<ReturnType<typeof makeArticleSchema>>;
+export type ParsedArticle = z.output<ReturnType<typeof makeArticleSchema>>;
 ```
+
+`coverMediaId` y `ogMediaId` son los únicos campos de entrada para imágenes; el servidor resuelve las URLs públicas desde `media`. `coverImageUrl` y `ogImageUrl` en la base son caché derivado, no entrada del cliente.
 
 El `kind` es un literal por variante, así que `discriminatedUnion` estrecha el tipo: en `value.kind === "review"`, `gameId` y `score` existen en el tipo. Los campos de reseña son nullable para que un borrador incompleto sea válido; la exigencia aparece al publicar, en el mismo lugar que los `CHECK` de la base.
 

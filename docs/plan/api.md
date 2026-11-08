@@ -36,6 +36,7 @@ export type ActionResult<T = undefined> =
       message: string;
       fieldErrors?: Record<string, string[]>;
       current?: unknown;
+      retryAfter?: number;
     };
 ```
 
@@ -62,7 +63,20 @@ Orden de ejecución: `assertSameOrigin()` → rate limit por IP → `scrypt` as�
 | Origen ajeno | `forbidden` | "Origen no permitido." |
 | Falta configuración | `server` | "El panel no está configurado." |
 
-La cookie se emite con `cookies().set()` dentro de la acción: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, `Max-Age` de 8 horas.
+La cookie se emite dentro de la acción con `cookies()` (async en Next 16):
+
+```ts
+const cookieStore = await cookies();
+cookieStore.set("session", token, {
+  httpOnly: true,
+  secure: true,
+  sameSite: "lax",
+  path: "/",
+  maxAge: 8 * 60 * 60,
+});
+```
+
+`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, `Max-Age` de 8 horas.
 
 ### `logout()`
 

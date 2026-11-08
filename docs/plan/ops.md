@@ -64,10 +64,10 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 | `IMAGES_PUBLIC_BASE_URL` | Sí | URL pública de Blob (`https://<store>.public.blob.vercel-storage.com`) |
 | `CRON_SECRET` | Sí | Bearer del endpoint de revalidación |
 | `AGE_PUBLIC_KEY` | Sí | Clave pública `age` para cifrar el dump de backup |
-**Custodia de la clave `age`**: la clave pública (`AGE_PUBLIC_KEY`) se usa para cifrar el backup en GitHub Actions. La clave privada (`AGE_PRIVATE_KEY`) se conserva fuera del repo y fuera de GitHub Actions (por ejemplo, en el gestor de contraseñas del autor o un secreto de entorno protegido), y se usa solo para la restauración mensual de prueba. Si se pierde, el backup cifrado no se puede recuperar.
 | `BLOB_STORE_ID` | No | ID del store de Vercel Blob (OIDC en Vercel suele proveerlo automáticamente; confirmar si el código lo usa realmente) |
 | `BLOB_READ_WRITE_TOKEN` | No | Token de lectura/escritura para desarrollo local y CI; en producción se usa OIDC |
-| `SITE` | Sí | Origen público usado por el cron de revalidación (`https://netti.vercel.app`). |
+
+**Custodia de la clave `age`**: la clave pública (`AGE_PUBLIC_KEY`) se usa para cifrar el backup en GitHub Actions. La clave privada (`AGE_PRIVATE_KEY`) se conserva fuera del repo y fuera de GitHub Actions (por ejemplo, en el gestor de contraseñas del autor o un secreto de entorno protegido), y se usa solo para la restauración mensual de prueba. Si se pierde, el backup cifrado no se puede recuperar.
 
 **El separador del hash es `:`, no `$`.** Next expande `$VAR` en los archivos `.env`; un hash con `$` queda corrupto y el login falla sin explicación.
 
@@ -84,7 +84,6 @@ DATABASE_URL_UNPOOLED=postgresql://...@...sa-east-1.aws.neon.tech/netti?sslmode=
 ADMIN_PASSWORD_HASH=scrypt:131072:8:1:
 IP_HASH_SECRET=
 CRON_SECRET=
-SITE=https://netti.vercel.app
 
 PUBLIC_SITE_URL=http://localhost:3000
 PREVIEW_ORIGIN_REGEX=https://.*-netti\.vercel\.app
