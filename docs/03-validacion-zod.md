@@ -22,7 +22,7 @@ export const makeArticleSchema = () => {
     description: z.string().trim().max(240).default(""),
     body: z.string().default(""),
     author: z.string().trim().max(60).nullable().optional(),
-    tags: z.array(z.string().trim().min(1).max(30).transform((val) => val.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, ''))).max(5).default([]),
+    tags: z.array(z.string().trim().min(1).max(30).transform((val) => val.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''))).max(5).default([]).transform((vals) => vals.filter((v) => v.length > 0)),
     coverMediaId: z.number().int().positive().nullable().optional(),
     coverAlt: z.string().trim().max(200).nullable().optional(),
     status: z.enum(["draft", "published"]).default("draft"),
