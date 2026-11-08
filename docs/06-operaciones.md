@@ -66,7 +66,7 @@ No hay factura sorpresa: **no se cobra el exceso, se bloquea el almacenamiento h
 | `BLOB_STORE_ID` | No | ID del store de Vercel Blob (OIDC en Vercel suele proveerlo automáticamente; confirmar si el código lo usa realmente) |
 | `BLOB_READ_WRITE_TOKEN` | No | Token de lectura/escritura para desarrollo local y CI; en producción se usa OIDC |
 
-**Custodia de la clave `age`**: la clave pública (`AGE_PUBLIC_KEY`) se usa para cifrar el backup en GitHub Actions. La clave privada (`AGE_PRIVATE_KEY`) se conserva fuera del repo y fuera de GitHub Actions (por ejemplo, en el gestor de contraseñas del autor o un secreto de entorno protegido), y se usa solo para la restauración mensual de prueba. Si se pierde, el backup cifrado no se puede recuperar.
+**Custodia de la clave `age`**: la clave pública (`AGE_PUBLIC_KEY`) se usa para cifrar el backup en GitHub Actions. La clave privada (`AGE_PRIVATE_KEY`) se conserva fuera del repo y fuera de GitHub Actions (por ejemplo, en el gestor de contraseñas del autor o un secreto de entorno protegido), y se usa solo para la restauración mensual de prueba. Si se pierde, el backup cifrado no se puede recuperar. Para la restauración mensual se hace desde la máquina del autor con la clave privada local, no desde un job automático de GitHub.
 
 **El separador del hash es `:`, no `$`.** Next expande `$VAR` en los archivos `.env`; un hash con `$` queda corrupto y el login falla sin explicación.
 
@@ -166,7 +166,7 @@ Workflow nocturno:
 
 **Heartbeat**: si el workflow no corre, nadie se entera. Un chequeo externo (healthchecks.io, gratis) avisa cuando el dump falta. Los workflows programados de GitHub se desactivan tras 60 días sin actividad en repos públicos.
 
-**Restauración probada mensualmente**: un job levanta Postgres 17 en un service container, restaura el dump y verifica conteos de filas. Un backup que nunca se restauró no es un backup.
+**Restauración probada mensualmente**: un job levanta Postgres 17 en un service container, restaura el dump y verifica conteos de filas. Un backup que nunca se restauró no es un backup. Para la restauración mensual se usa la clave privada `AGE_PRIVATE_KEY` desde la máquina del autor, no desde GitHub Actions.
 
 ### 2.6 Revalidación programada
 

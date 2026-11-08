@@ -6,12 +6,14 @@ Plan de reconstrucción de Netti. Es la referencia para cualquier persona o agen
 
 | Archivo | Qué explica |
 |---------|-------------|
-| `README.md` | Visión, alcance, reglas e índice. |
-| `stack.md` | Stack, arquitectura y decisiones D-001 a D-022. |
-| `content.md` | Esquema SQL, restricciones y validación con Zod. |
-| `ui.md` | Paleta, panel y flujo editorial. |
-| `api.md` | Server Actions y los Route Handlers (`upload`, `revalidate`, `health`, `ready`). |
-| `ops.md` | Git, entorno, backups, despliegue y hoja de ruta. |
+| `00-vision.md` | Visión, alcance, reglas e índice |
+| `01-stack.md` | Stack, arquitectura y decisiones D-001 a D-022 |
+| `02-modelo-datos.md` | Esquema SQL, restricciones y tablas |
+| `03-validacion-zod.md` | Esquemas Zod y contratos de validación (incl. juegos) |
+| `04-api-acciones.md` | Server Actions, contratos y Route Handlers |
+| `05-ui-flujo.md` | Paleta, panel y flujo editorial |
+| `06-operaciones.md` | Git, entorno, backups, despliegue y hoja de ruta |
+| `07-reconciliacion-y-cron.md` | Reconciliación de Blob, cursor del cron y contratos faltantes |
 
 ## Qué es Netti
 
@@ -19,12 +21,13 @@ Blog editorial de videojuegos en español, de un solo autor, con reseñas (puntu
 
 ## Cómo usar estos documentos
 
-1. Para entender el contexto y el stack: `stack.md`.
-2. Para modelar datos: `content.md`.
-3. Para construir interfaz: `ui.md`.
-4. Para escribir Server Actions o endpoints: `api.md`.
-5. Para configurar el repo y desplegar: `ops.md`.
-6. Para empezar a programar: `ops.md`, **Fase 0**.
+1. Para entender el contexto y el stack: `01-stack.md`.
+2. Para modelar datos: `02-modelo-datos.md`.
+3. Para validación: `03-validacion-zod.md`.
+4. Para escribir Server Actions o endpoints: `04-api-acciones.md`.
+5. Para construir interfaz: `05-ui-flujo.md`.
+6. Para configurar el repo y desplegar: `06-operaciones.md`.
+7. Para empezar a programar: `06-operaciones.md`, **Fase 0**.
 
 ## Reglas
 
@@ -59,6 +62,6 @@ Cada afirmación de infraestructura lleva su grado de certeza. Sin esto, una hip
 
 ## Estado
 
-Documentación revisada contra las versiones de noviembre de 2026 y contra tres revisiones arquitectónicas independientes. No hay código todavía.
+Documentación revisada contra las versiones de noviembre de 2026 y contra varias revisiones arquitectónicas independientes. No hay código todavía.
 
-**Próximo paso**: Fase 0 de `ops.md`. Es un spike de tres días para medir consumo de Neon, invalidación de caché, `scrypt`, subida real a Blob y backup restaurado, antes de escribir el panel. Si esos números no cierran, se corrige el diseño con evidencia y no se sigue documentando.
+**Próximo paso**: Fase 0 de `06-operaciones.md`. Es un spike de tres días para medir consumo de Neon, invalidación de caché, `scrypt`, subida real a Blob y backup restaurado, antes de escribir el panel. Si esos números no cierran, se corrige el diseño con evidencia y no se sigue documentando.

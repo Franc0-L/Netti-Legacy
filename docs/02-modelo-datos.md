@@ -1,10 +1,6 @@
 # Modelo de Contenido y Validación — Netti
 
-Define el esquema PostgreSQL (Neon), las restricciones que viven en la base y los esquemas Zod que validan la entrada.
-
-**Principio**: la base impone lo que puede imponer. Zod da mensajes al editor; la base es la última línea. Un borrador es válido con casi todo vacío; una publicación, no.
-
----
+Define el esquema PostgreSQL (Neon), las restricciones que viven en la base y las tablas auxiliares.
 
 ## 1. Tablas
 
@@ -17,6 +13,8 @@ Define el esquema PostgreSQL (Neon), las restricciones que viven en la base y lo
 | `sessions` | Sesiones del panel |
 | `login_attempts` | Rate limiting del login |
 | `redirects` | Redirecciones por cambio de slug |
+| `storage_orphans` | Registro de compensación entre Blob y Postgres |
+| `cron_runs` | Cursor del job de revalidación programada |
 
 ### Por qué una sola tabla `articles`
 
@@ -137,7 +135,7 @@ end;
 $$;
 ```
 
-El trigger de redirecciones se ejecuta `BEFORE INSERT OR UPDATE` y limpia ciclos y cadenas. Sin él, renombrar A→B y luego B→A deja un bucle infinito que el navegador corta y el SEO castiga.
+El trigger de redirecciones se ejecuta `BEFORE INSERT OR UPDATE` y colapsa cadenas y rechaza ciclos. Sin él, renombrar A→B y luego B→A deja un bucle infinito que el navegador corta y el SEO castiga.
 
 ### 2.1 `games`
 
@@ -167,7 +165,9 @@ create table games (
     check (status <> 'published' or (cover_image_url is null and cover_media_id is null)
            or char_length(btrim(coalesce(cover_alt, ''))) > 0),
   constraint games_published_requires_cover
-    check (status <> 'published' or cover_image_url is not null)
+    check (status <> 'published' or cover_image_url is not null),
+  constraint games_not_trashed
+    check (status <> 'trashed')
 );
 
 create unique index games_external_idx
@@ -188,6 +188,8 @@ create trigger games_set_updated_at
 ```
 
 `release_date` es `date` completa, no solo año: las noticias suelen anunciar lanzamientos futuros y el año solo no alcanza.
+
+`games` no tiene `previous_status` ni `trashed_at` en la v1: se borra físicamente (ya protegido por `ON DELETE RESTRICT` si tiene reseñas publicadas).
 
 ### 2.2 `articles`
 
@@ -376,90 +378,16 @@ create table media (
   pending_delete_at timestamptz,
   created_at    timestamptz not null default now(),
   constraint media_single_owner
-    check (num_nonnulls(article_id, game_id) <= 1)
+    check (num_nonnulls(article_id, game_id) <= 1),
+  constraint media_rights_require_credit
+    check (rights = 'own' or char_length(btrim(coalesce(credit, ''))) > 0),
+  constraint media_source_url_valid
+    check (source_url is null or source_url ~* '^https?://')
 );
-
--- FK circular: articles -> media (cover_media_id, og_media_id) y media -> articles (article_id).
--- Para insertar, se hace en dos pasos: primero el artículo con media_id null, luego el medio,
--- y finalmente se actualiza el artículo con el media_id. PostgreSQL permite FK circulares con
--- ON DELETE SET NULL, pero no en una sola sentencia.
-
--- Evita reasignar un medio marcado para borrado (condición de carrera en mark-and-sweep).
--- Solo rechaza cambios en article_id / game_id cuando el medio ya está marcado.
--- Cuando se borra el artículo primero (ON DELETE SET NULL pone article_id = NULL),
--- el trigger no se dispara porque article_id no cambia en ese momento.
-create or replace function protect_media_during_purge()
-returns trigger
-language plpgsql
-as $$
-begin
-  if old.pending_delete_at is not null
-     and (new.article_id is distinct from old.article_id
-          or new.game_id is distinct from old.game_id) then
-    raise exception 'No se puede reasignar un medio marcado para eliminación.' using errcode = '23514';
-  end if;
-  return new;
-end;
-$$;
-
-create trigger media_protect_during_purge
-  before update on media
-  for each row
-  execute function protect_media_during_purge();
 
 create index media_pending_delete_idx
   on media (pending_delete_at)
   where pending_delete_at is not null;
-
--- FK circulares: games y articles apuntan a media. Se agregan con ALTER TABLE
--- porque media se crea después de games y articles, y PostgreSQL no permite
--- declarar una FK hacia una tabla que todavía no existe.
-alter table games
-  add constraint games_cover_media_fk
-  foreign key (cover_media_id) references media (id) on delete set null;
-
-alter table articles
-  add constraint articles_cover_media_fk
-  foreign key (cover_media_id) references media (id) on delete set null;
-
-alter table articles
-  add constraint articles_og_media_fk
-  foreign key (og_media_id) references media (id) on delete set null;
-
-create table media_variants (
-  media_id   integer not null references media (id) on delete cascade,
-  width      integer not null,
-  format     text not null default 'webp' check (format = 'webp'),
-  storage_key text not null unique,
-  bytes      integer not null,
-  primary key (media_id, width, format)
-);
-
--- Registro de compensación para subidas/borrados fallidos entre Blob y Postgres.
--- Si falla el INSERT en media tras subir objetos, o falla un del de Blob, se anota
--- aquí para que un job de baja frecuencia repare o reporte el desajuste.
-create table storage_orphans (
-  id          bigint generated always as identity primary key,
-  storage_key text not null,
-  action      text not null check (action in ('put', 'del')),
-  status      text not null default 'pending' check (status in ('pending', 'repaired', 'orphaned')),
-  created_at  timestamptz not null default now(),
-  repaired_at timestamptz
-);
-
-create index storage_orphans_pending_idx
-  on storage_orphans (status)
-  where status = 'pending';
-
--- Cursor de ejecución del job de revalidación programada. Permite recuperar
--- publicaciones pendientes si una ejecución se retrasa o falla.
-create table cron_runs (
-  job_name         text not null primary key,
-  last_success_at  timestamptz,
-  last_run_at      timestamptz not null default now()
-);
-
-insert into cron_runs (job_name) values ('revalidate_scheduled') on conflict do nothing;
 ```
 
 Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas huérfanas se acumulan. `credit`, `rights` y `source_url` documentan procedencia: una carátula disponible públicamente no es una carátula libre de derechos.
@@ -472,9 +400,15 @@ Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas
 2. Fuera de la transacción: borrar en Blob el objeto y sus variantes.
 3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
 
-Si Blob falla, la fila queda marcada y se reintenta. Nunca al revés: borrar el objeto antes de confirmar la base deja referencias rotas que no se pueden reparar.
+Si Blob falla, la fila queda marcada y se reintenta. Nunca al revés: borrar el objeto antes de confirmar la base deja referencias rotas que no se pueden reparar. Las imágenes referenciadas por otro artículo no se marcan.
 
 **Imágenes dentro del cuerpo.** No se pegan URLs. El editor inserta `![texto alternativo](media:12)` y un plugin de remark resuelve el id contra `media`/`media_variants`, genera `srcset` y dimensiones. Así la purga sabe qué medios referencia el cuerpo, se evita CLS y una URL mal copiada no rompe la imagen.
+
+**Borrado de medios con FKs circulares.** `games` y `articles` declaran FK hacia `media` (`cover_media_id`, `og_media_id`), y `media` declara FK hacia `games` y `articles` (`article_id`, `game_id`). El orden de creación es:
+
+1. `games` y `articles` (sin FK a `media`).
+2. `media` (con FK a `games` y `articles`).
+3. `ALTER TABLE` para agregar las FK `cover_media_id` y `og_media_id` en `games` y `articles`.
 
 ### 2.5 `article_revisions`
 
@@ -550,184 +484,35 @@ create trigger redirects_validate
 
 Se consulta **solo cuando el artículo no existe**, con el mapa cacheado bajo el tag `redirects`. No se consulta en cada request ni en el proxy.
 
----
+### 2.9 `storage_orphans`
 
-## 3. Validación Zod
+```sql
+create table storage_orphans (
+  id          bigint generated always as identity primary key,
+  storage_key text not null,
+  action      text not null check (action in ('put', 'del')),
+  status      text not null default 'pending' check (status in ('pending', 'repaired', 'orphaned')),
+  created_at  timestamptz not null default now(),
+  repaired_at timestamptz
+);
 
-Los esquemas viven en `lib/validation.ts`. **No se importan directamente en el cliente**: se construyen con una fábrica sin parámetros, porque las URLs de imágenes se resuelven en el servidor desde `media`, no se reciben desde el cliente.
-
-### 3.1 Esquema de artículo
-
-Todo lo que sigue vive dentro de `makeArticleSchema()`, que construye el esquema de validación de entradas del cliente. No recibe parámetros: las URLs de imágenes se resuelven en el servidor desde `media`, no se reciben desde el cliente. Los bloques de esta sección se leen como un solo módulo.
-
-```ts
-export const makeArticleSchema = () => {
-  // Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
-  const baseArticle = z.object({
-    slug: z
-      .string()
-      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Solo minúsculas, números y guiones.")
-      .or(z.literal("")),
-    title: z.string().trim().max(120).default(""),
-    description: z.string().trim().max(240).default(""),
-    body: z.string().default(""),
-    author: z.string().trim().max(60).nullable().optional(),
-    tags: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
-    coverMediaId: z.number().int().positive().nullable().optional(),
-    coverAlt: z.string().trim().max(200).nullable().optional(),
-    status: z.enum(["draft", "published"]).default("draft"),
-    publishedAt: z
-      .iso
-      .datetime({ offset: true })
-      .nullable()
-      .optional()
-      .transform((val) => (val ? new Date(val) : null)),
-    featured: z.boolean().default(false),
-    seoTitle: z.string().trim().max(70).nullable().optional(),
-    seoDescription: z.string().trim().max(160).nullable().optional(),
-    ogMediaId: z.number().int().positive().nullable().optional(),
-  });
-
-  const reviewShape = baseArticle.extend({
-    kind: z.literal("review"),
-    gameId: z.number().int().positive().nullable().optional(),
-    score: z.number().int().min(1).max(10).nullable().optional(),
-    scoreReason: z.string().trim().max(2000).nullable().optional(),
-    verdict: z.string().trim().max(500).nullable().optional(),
-  });
-
-  const newsShape = baseArticle.extend({
-    kind: z.literal("news"),
-    category: z.string().trim().max(40).nullable().optional(),
-    sourceName: z.string().trim().max(120).nullable().optional(),
-    sourceUrl: z
-      .string()
-      .regex(/^https?:\/\//i, "La fuente debe empezar por http:// o https://.")
-      .nullable()
-      .optional(),
-  });
-
-  const guideShape = baseArticle.extend({ kind: z.literal("guide") });
-
-  const articleSchema = z
-    .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
-    .superRefine((value, ctx) => {
-      const publishing = value.status === "published";
-      if (!publishing) return;
-
-      if (value.title.trim().length < 3)
-        ctx.addIssue({ code: "custom", path: ["title"], message: "El título necesita al menos 3 caracteres." });
-      if (!value.slug)
-        ctx.addIssue({ code: "custom", path: ["slug"], message: "Una publicación necesita slug." });
-      if (value.body.trim().length < 10)
-        ctx.addIssue({ code: "custom", path: ["body"], message: "El cuerpo necesita al menos 10 caracteres." });
-      if (value.coverMediaId && !value.coverAlt?.trim())
-        ctx.addIssue({ code: "custom", path: ["coverAlt"], message: "La portada necesita texto alternativo." });
-      if (!value.publishedAt)
-        ctx.addIssue({ code: "custom", path: ["publishedAt"], message: "Una publicación necesita fecha." });
-
-      if (value.kind === "review") {
-        if (!value.gameId)
-          ctx.addIssue({ code: "custom", path: ["gameId"], message: "Elegí un juego." });
-        if (value.score == null)
-          ctx.addIssue({ code: "custom", path: ["score"], message: "Falta la puntuación." });
-        if (!value.scoreReason || value.scoreReason.trim().length < 20)
-          ctx.addIssue({ code: "custom", path: ["scoreReason"], message: "Justificá la puntuación (mínimo 20)." });
-        if (!value.verdict || value.verdict.trim().length < 10)
-          ctx.addIssue({ code: "custom", path: ["verdict"], message: "El veredicto necesita al menos 10 caracteres." });
-      }
-    });
-
-  return articleSchema;
-};
-
-export type ArticleInput = z.input<ReturnType<typeof makeArticleSchema>>;
-export type ParsedArticle = z.output<ReturnType<typeof makeArticleSchema>>;
+create index storage_orphans_pending_idx
+  on storage_orphans (status)
+  where status = 'pending';
 ```
 
-`coverMediaId` y `ogMediaId` son los únicos campos de entrada para imágenes; el servidor resuelve las URLs públicas desde `media`. `coverImageUrl` y `ogImageUrl` en la base son caché derivado, no entrada del cliente.
+Registro de compensación para subidas/borrados fallidos entre Blob y Postgres. Si falla el `INSERT` en `media` tras subir objetos, o falla un `del` de Blob, se anota aquí para que un job de baja frecuencia repare o reporte el desajuste.
 
-El `kind` es un literal por variante, así que `discriminatedUnion` estrecha el tipo: en `value.kind === "review"`, `gameId` y `score` existen en el tipo. Los campos de reseña son nullable para que un borrador incompleto sea válido; la exigencia aparece al publicar, en el mismo lugar que los `CHECK` de la base.
+### 2.10 `cron_runs`
 
-**Pendiente:** `makeGameSchema` para el CRUD de fichas de juegos (slug, portada, estado, plataformas, géneros). Se define antes de crear ese CRUD; no bloquea el MVP de reseñas.
+```sql
+create table cron_runs (
+  job_name         text not null primary key,
+  last_success_at  timestamptz,
+  last_run_at      timestamptz not null default now()
+);
 
-`sourceUrl` usa la misma regla que el `CHECK` (`~*`), insensible a mayúsculas. Si Zod fuera más laxo, `HTTPS://x` pasaría la validación y fallaría en la base con un `500`.
-
-### 3.2 Subida
-
-```ts
-export const UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
-export const MAX_MEGAPIXELS = 20;
-export const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/avif"] as const;
+insert into cron_runs (job_name) values ('revalidate_scheduled') on conflict do nothing;
 ```
 
-El servidor valida, en este orden: tamaño declarado (como pista), tamaño real, MIME, magic numbers, dimensiones decodificadas y megapíxeles. Después re-encodea con `sharp`, que descarta EXIF (incluido GPS) y las estructuras del archivo original, y genera las variantes. `sharp` reduce la superficie de un archivo manipulado; no es una garantía absoluta frente a vulnerabilidades del decodificador, así que la dependencia se mantiene actualizada.
-
-**GIF queda fuera.** La salida es WebP estático y `sharp` descartaría los fotogramas en silencio. Aceptar el formato para luego romper la animación es peor que rechazarlo con un mensaje claro. Si algún día se necesitan animaciones, se decide y se implementa entonces.
-
-**Compensación de subida (saga).** No hay transacción distribuida entre Blob y PostgreSQL. El flujo es:
-
-1. Subir objetos a Blob (original + variantes).
-2. Insertar metadatos en `media` y `media_variants` dentro de una transacción.
-3. Si la transacción falla, intentar borrar los objetos de Blob subidos.
-4. Si la compensación falla, registrar las claves en un mecanismo de reconciliación (job de baja frecuencia que compara `media.storage_key` con el store de Blob y reporta huérfanos).
-
-No se puede tratar como una sola operación atómica; hay que asumir fallos parciales y tener un camino de recuperación.
-
----
-
-## 4. Estados y transiciones
-
-| Desde | Acción | Hacia | Notas |
-|-------|--------|-------|-------|
-| — | Crear | `draft` | Todo vacío salvo `kind` |
-| `draft` | Publicar | `published` | Valida completitud; si `published_at` es futuro, queda programado |
-| `draft` | Programar | `published` | Igual, con `published_at` futuro |
-| `published` | Guardar cambios | `published` | Revalida; no despublica |
-| `published` | Despublicar | `draft` | `published_at` se conserva |
-| `draft` / `published` | Borrar | `trashed` | Guarda `previous_status` y `trashed_at` |
-| `trashed` | Restaurar | `previous_status` | Si el slug está tomado, el servidor reintenta con sufijo |
-| `trashed` | Purgar | — | Marca, borra en Blob y recién entonces borra las filas |
-
-**No existe `scheduled`.** Un artículo `published` con `published_at` futuro no es visible porque la consulta pública exige `published_at <= now()`. Eso elimina un valor del enum y un `CHECK`. La decisión de cuándo se hace visible no depende de un cron: el dato ya es correcto aunque nadie revalide.
-
-Lo que sí necesita un job es **invalidar la caché** cuando llega la hora. Se resuelve con una GitHub Action cada 30 minutos que llama a un endpoint protegido, idempotente, que revalida lo que cruzó `published_at` desde la última ejecución. Si falla, el artículo se ve igual en la siguiente revalidación; el peor caso es un retraso, no una fuga.
-
-### Predicado único de visibilidad
-
-```ts
-export function visibleArticle(now: Date = new Date()) {
-  return and(
-    eq(articles.status, "published"),
-    lte(articles.publishedAt, now),
-  );
-}
-```
-
-`now` se pasa como parámetro para que cada consulta use un reloj fresco y los tests puedan fijarlo. Toda consulta pública usa este helper. No se escribe la condición a mano en ningún lado.
-
----
-
-## 5. Imágenes
-
-- Almacenamiento: Vercel Blob, servido desde `*.public.blob.vercel-storage.com` sin dominio propio.
-- Clave: `articles/<uuid>.webp` o `games/<uuid>.webp` (la salida es siempre WebP). **Nunca** el nombre del archivo del usuario ni el slug, que cambian.
-- `sharp` limita a 2560 px de lado mayor, descarta EXIF (incluido GPS) y genera variantes de 480, 960 y 1600 px.
-- `cacheControlMaxAge: 31536000` en cada `put` (caché larga, segura porque la clave lleva UUID y el contenido nunca cambia).
-- Se inserta una fila en `media` y una por variante en `media_variants`.
-- El render usa un `loader` propio que elige la variante según `srcset`. No se delega a `next/image` por defecto: la cuota de transformaciones de Hobby es de 5.000 al mes y cada combinación de ancho, formato y calidad cuenta.
-- SVG rechazado. GIF rechazado (la salida es estática). AVIF acepta las marcas `avif`, `avis` y `mif1` con `avif` compatible.
-- Tope de 2 MB en la subida, pero el cliente **redimensiona antes** a WebP: una captura PNG de 1080p supera los 2 MB con facilidad.
-- **Imágenes del cuerpo**: el Markdown guarda `![alt](media:12)`, nunca una URL pegada. Un plugin de remark resuelve el id, obtiene dimensiones y variantes de `media`, y genera `<img srcset sizes width height>`. Así se evita CLS, la purga sabe qué medios referencia el cuerpo y una URL mal copiada no rompe la imagen.
-- Borrar un artículo no borra sus imágenes (papelera). La purga definitiva sí, siguiendo el orden mark-and-sweep de §2.4. Blob no tiene concepto de "pendiente de eliminación" al nivel del store; la marca vive en Postgres y el sweeper lee esa tabla para saber qué borrar de Blob.
-
----
-
-## 6. Integridad y concurrencia
-
-- **Edición**: `UPDATE ... WHERE id = $1 AND version = $2 RETURNING version`. Si no devuelve fila, se hace un `SELECT` para distinguir `404` de `409`. Nunca read-modify-write sin condición.
-- **Slug**: el índice parcial `(kind, slug) WHERE status <> 'trashed' AND slug <> ''` garantiza unicidad aunque dos peticiones lleguen juntas. No se hace pre-chequeo.
-- **Restaurar con slug ocupado**: se intenta el `UPDATE` y se captura `23505` para proponer un sufijo. Un pre-chequeo tendría condición de carrera.
-- **Cambio de slug**: misma transacción, `UPDATE` del artículo + `INSERT` en `redirects`. El trigger colapsa cadenas y rompe ciclos.
-- **Juego con reseñas**: `ON DELETE RESTRICT` cubre el borrado físico. El soft delete de un juego con reseñas publicadas se bloquea en la capa de servicio: la base no puede expresar "no lo marques trashed si otro tiene una fila publicada que lo referencia" sin un trigger, y un trigger ahí es más frágil que la comprobación explícita.
-- **Publicar sin fecha**: el servidor completa `published_at = now()` antes del `INSERT`/`UPDATE`. Así el `CHECK` y Zod nunca se contradicen.
+Cursor de ejecución del job de revalidación programada. Permite recuperar publicaciones pendientes si una ejecución se retrasa o falla.

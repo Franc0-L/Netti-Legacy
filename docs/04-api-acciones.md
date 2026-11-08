@@ -15,8 +15,6 @@ Con Server Actions desaparece el contrato de 300 líneas que antes describía `/
 
 **Todas las acciones de escritura** empiezan con `requireSession()` y `assertSameOrigin()`. Ninguna confía en el proxy.
 
----
-
 ## 2. Resultado uniforme
 
 ```ts
@@ -41,8 +39,6 @@ export type ActionResult<T = undefined> =
 ```
 
 Los componentes leen `result.ok` y muestran `message` o `fieldErrors`. No hay códigos HTTP que interpretar, salvo en los Route Handlers.
-
----
 
 ## 3. Autenticación
 
@@ -86,8 +82,6 @@ Borra la fila de `sessions` y la cookie. Idempotente.
 
 `TRUNCATE sessions`. Cierra todas las sesiones, incluida la actual.
 
----
-
 ## 4. Contenido
 
 ### 4.0 Una escritura, una transacción
@@ -107,7 +101,7 @@ await db.transaction(async (tx) => {
   await tx.insert(articleRevisions).values({
     articleId: id,
     version: row.version,
-    snapshot: values,
+    snapshot: row, // fila completa de RETURNING *, sin search_vector
   });
 });
 ```
@@ -267,7 +261,7 @@ async function purgeArticle(args: {
 
 **Orden mark-and-sweep** (Postgres y Blob no comparten transacción):
 
-1. En una transacción: marcar `media.pending_delete_at` para los medios que ninguna otra entrada referencia (portada, `og_image_url` o `media:<id>` en el cuerpo) y borrar la fila del artículo (las revisiones caen por `ON DELETE CASCADE`).
+1. En una transacción: recolectar los ids de medios que solo referencia este artículo, borrar la fila del artículo (la FK `ON DELETE SET NULL` libera `media.article_id` y `articles.cover_media_id`/`og_media_id`), y recién entonces marcar `pending_delete_at` en los medios huérfanos (las revisiones caen por `ON DELETE CASCADE`).
 2. Fuera de la transacción: borrar en Blob el objeto y sus variantes.
 3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
 
@@ -278,8 +272,6 @@ Invalidación: `article:<kind>:<slug>`, `kind:<kind>`, `articles`, `home` si est
 ### `searchGames({ q, limit })`
 
 Lectura para el autocompletado. Usa `pg_trgm`, no `tsvector` (los prefijos de dos letras no funcionan con full-text).
-
----
 
 ## 5. Route Handlers
 
@@ -374,8 +366,6 @@ Son dos comprobaciones distintas y no intercambiables.
 ```json
 { "ok": false, "db": "unreachable", "storage": "ok" }
 ```
-
----
 
 ## 6. Cabeceras
 
