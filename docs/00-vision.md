@@ -66,6 +66,8 @@ Cada afirmación de infraestructura lleva su grado de certeza. Sin esto, una hip
 | 3 | **Cron de revalidación.** GitHub Actions hoy; Vercel Schedules cuando salga de beta con condiciones aceptables. | Decidida con validación pendiente | Endpoint idempotente, `last_success_at`, retraso acotado, medición de CU-h por despertar (Fase 0). |
 | 4 | **Caché pública con `"use cache"` + `cacheLife("max")`.** | Validación: pendiente | `x-vercel-cache` en visitas repetidas y lectura sin consultas a Neon. |
 | 5 | **CSP con hashes en lo público, nonces en `/admin`.** | Validación: pendiente | Verificar que los scripts inline de Next.js admitan hashes estáticos; si no, evaluar nonces en lo público. |
+| 6 | **Códigos 404 y 308 reales con `cacheComponents: true`.** | Validación: pendiente | Verificar que 404 y 308 no queden atrapados en Suspense ni en `loading.tsx`; que salgan como respuesta HTTP real. |
+| 7 | **Lecturas de Blob: ¿operaciones simples o avanzadas?** | Validación: pendiente | Confirmar si `list` y las lecturas con CDN miss cuentan como operaciones simples (10.000/mes) o avanzadas (2.000/mes). |
 
 ## Estado
 
