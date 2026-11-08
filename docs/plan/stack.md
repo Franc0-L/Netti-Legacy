@@ -100,9 +100,9 @@ Por tanto, la frase de `README.md` —"la lectura pública no despierta la base"
 
 Este punto es un bloqueante de la Fase 0: sin esta prueba, no apruebo la arquitectura de producción.
 
-**Invalidación granular**: una función pura `affectedTags(before, after)` devuelve los tags de la entrada, del listado del `kind`, de las etiquetas **viejas y nuevas**, y `home` solo si cambió `status`, `published_at`, `featured` o la portada. Corregir una tilde no invalida la portada.
+**Invalidación granular**: una función pura `affectedTags(before, after)` devuelve los tags de la entrada, del listado del `kind`, de las etiquetas **viejas y nuevas**, y `home` solo si cambió un campo que se renderiza en la portada (`status`, `published_at`, `featured`, `title`, `description` o `score`). Corregir una tilde en el cuerpo no invalida la portada.
 
-**Inventario de proyecciones.** Un tag por entrada no alcanza si el contenido aparece en seis lugares. La tabla es chica y explícita:
+**Inventario de proyecciones.** Un tag por entrada no alcanza si el contenido aparece en varios lugares. La tabla es chica y explícita:
 
 | Proyección | Tags |
 |------------|------|
@@ -114,7 +114,7 @@ Este punto es un bloqueante de la Fase 0: sin esta prueba, no apruebo la arquite
 | Sitemap y RSS | `articles`, `kind:<kind>` |
 | Redirecciones | `redirects` |
 
-`affectedTags` es la implementación, no la documentación: la tabla es la fuente. Los tests de integración publican, cambian slug, borran y restauran, y comprueban las siete proyecciones.
+`affectedTags` agrega `redirects` cuando cambia el slug, y `game:<slug>` cuando una reseña asociada a una ficha cambia de forma que afecte su listado de reseñas. `affectedTags` es la implementación, no la documentación: la tabla es la fuente. Los tests de integración publican, cambian slug, borran y restauran, y comprueban las siete proyecciones.
 
 **Programados**: `published_at` futuro no se ve porque el predicado público exige `published_at <= now()`. Un job cada 30 minutos llama a un Route Handler protegido que revalida lo que cruzó la hora. Si falla, el artículo aparece en la siguiente revalidación: retraso, no fuga.
 
@@ -272,7 +272,6 @@ netti/
 │   ├── images.ts                  # sharp + variantes
 │   ├── storage.ts                 # put/delete (Blob)
 │   ├── validation.ts              # makeArticleSchema(baseUrl)
-│   ├── storage.ts                 # put/delete (Blob)
 │   └── seo.ts                     # safeJsonLd, safeCdata
 ├── public/fonts/
 ├── proxy.ts
@@ -415,6 +414,7 @@ export interface ArticleTagState {
   description: string;
   coverMediaId: number | null;
   gameId: number | null;
+  score: number | null;
 }
 
 export function affectedTags(

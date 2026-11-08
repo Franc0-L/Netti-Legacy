@@ -77,6 +77,10 @@ as $$
 declare
   cycle_found boolean;
 begin
+  -- Serializa las modificaciones del grafo de redirecciones para evitar ciclos
+  -- creados por transacciones concurrentes (ej. A→B y B→A al mismo tiempo).
+  perform pg_advisory_xact_lock(hashtext('redirects_graph'));
+
   -- Evita recursión: el UPDATE de abajo vuelve a disparar este trigger
   if pg_trigger_depth() > 1 then
     return new;
@@ -86,12 +90,21 @@ begin
     raise exception 'La redirección apunta a sí misma.' using errcode = '23514';
   end if;
 
-  -- Rutas internas absolutas: empiezan por '/' seguido de un carácter no '/',
-  -- no contienen '//' (rechaza '//evil.com' y rutas relativas).
+  -- Rutas internas absolutas: empiezan por '/' seguido de un carácter no '/'.
+  -- Rechaza '//' (open redirect), barras invertidas, caracteres de control,
+  -- query strings y fragmentos. El contrato es solo de paths internos.
   if new.from_path !~ '^/[^/][^ ]*$'
      or new.to_path !~ '^/[^/][^ ]*$'
      or new.from_path like '%//%'
-     or new.to_path like '%//%' then
+     or new.to_path like '%//%'
+     or new.from_path like '%\\%'
+     or new.to_path like '%\\%'
+     or new.from_path like '%?%'
+     or new.to_path like '%?%'
+     or new.from_path like '%#%'
+     or new.to_path like '%#%'
+     or new.from_path ~ '[[:cntrl:]]'
+     or new.to_path ~ '[[:cntrl:]]' then
     raise exception 'Las rutas de redirección deben ser internas absolutas.' using errcode = '23514';
   end if;
 
@@ -373,12 +386,14 @@ create table media (
 -- ON DELETE SET NULL, pero no en una sola sentencia.
 
 -- Evita reasignar un medio marcado para borrado (condición de carrera en mark-and-sweep).
+-- Se dispara si el medio ya estaba marcado o si se va a marcar, y rechaza cualquier cambio
+-- en sus asignaciones (article_id / game_id).
 create or replace function protect_media_during_purge()
 returns trigger
 language plpgsql
 as $$
 begin
-  if new.pending_delete_at is not null
+  if (old.pending_delete_at is not null or new.pending_delete_at is not null)
      and (new.article_id is distinct from old.article_id
           or new.game_id is distinct from old.game_id) then
     raise exception 'No se puede reasignar un medio marcado para eliminación.' using errcode = '23514';
@@ -390,8 +405,12 @@ $$;
 create trigger media_protect_during_purge
   before update on media
   for each row
-  when (old.pending_delete_at is not null)
   execute function protect_media_during_purge();
+
+-- Las asignaciones desde articles (cover_media_id, og_media_id) y games (cover_media_id)
+-- deben consultar media dentro de la misma transacción y rechazar el medio si
+-- media.pending_delete_at no es nulo. Este trigger no cubre esos puntos de asignación;
+-- es responsabilidad de las acciones del servidor validarlo antes de escribir.
 
 create index media_pending_delete_idx
   on media (pending_delete_at)
@@ -569,80 +588,78 @@ Todo lo que sigue vive dentro de `makeArticleSchema(imagesBaseUrl)`, que recibe 
 export const makeArticleSchema = (imagesBaseUrl: string) => {
   const cover = imageUrlSchema(imagesBaseUrl);
 
-// Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
-const baseArticle = z.object({
-  slug: z
-    .string()
-    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Solo minúsculas, números y guiones.")
-    .or(z.literal("")),
-  title: z.string().trim().max(120).default(""),
-  description: z.string().trim().max(240).default(""),
-  body: z.string().default(""),
-  author: z.string().trim().max(60).nullable().optional(),
-  tags: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
-  coverImageUrl: cover,
-  coverMediaId: z.number().int().positive().nullable().optional(),
-  coverAlt: z.string().trim().max(200).nullable().optional(),
-  status: z.enum(["draft", "published", "trashed"]).default("draft"),
-  publishedAt: z.coerce.date().nullable().optional(),
-  featured: z.boolean().default(false),
-  seoTitle: z.string().trim().max(70).nullable().optional(),
-  seoDescription: z.string().trim().max(160).nullable().optional(),
-  ogImageUrl: cover,
-  ogMediaId: z.number().int().positive().nullable().optional(),
-});
-
-const reviewShape = baseArticle.extend({
-  kind: z.literal("review"),
-  gameId: z.number().int().positive().nullable().optional(),
-  score: z.number().int().min(1).max(10).nullable().optional(),
-  scoreReason: z.string().trim().max(2000).nullable().optional(),
-  verdict: z.string().trim().max(500).nullable().optional(),
-});
-
-const newsShape = baseArticle.extend({
-  kind: z.literal("news"),
-  category: z.string().trim().max(40).nullable().optional(),
-  sourceName: z.string().trim().max(120).nullable().optional(),
-  sourceUrl: z
-    .string()
-    .regex(/^https?:\/\//i, "La fuente debe empezar por http:// o https://.")
-    .nullable()
-    .optional(),
-});
-
-const guideShape = baseArticle.extend({ kind: z.literal("guide") });
-
-const articleSchema = z
-  .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
-  .superRefine((value, ctx) => {
-    const publishing = value.status === "published";
-    if (!publishing) return;
-
-    if (value.title.trim().length < 3)
-      ctx.addIssue({ code: "custom", path: ["title"], message: "El título necesita al menos 3 caracteres." });
-    if (!value.slug)
-      ctx.addIssue({ code: "custom", path: ["slug"], message: "Una publicación necesita slug." });
-    if (value.body.trim().length < 10)
-      ctx.addIssue({ code: "custom", path: ["body"], message: "El cuerpo necesita al menos 10 caracteres." });
-    if (value.coverImageUrl && !value.coverAlt?.trim())
-      ctx.addIssue({ code: "custom", path: ["coverAlt"], message: "La portada necesita texto alternativo." });
-    if (!value.publishedAt)
-      ctx.addIssue({ code: "custom", path: ["publishedAt"], message: "Una publicación necesita fecha." });
-
-    if (value.kind === "review") {
-      if (!value.gameId)
-        ctx.addIssue({ code: "custom", path: ["gameId"], message: "Elegí un juego." });
-      if (value.score == null)
-        ctx.addIssue({ code: "custom", path: ["score"], message: "Falta la puntuación." });
-      if (!value.scoreReason || value.scoreReason.trim().length < 20)
-        ctx.addIssue({ code: "custom", path: ["scoreReason"], message: "Justificá la puntuación (mínimo 20)." });
-      if (!value.verdict || value.verdict.trim().length < 10)
-        ctx.addIssue({ code: "custom", path: ["verdict"], message: "El veredicto necesita al menos 10 caracteres." });
-    }
+  // Campos comunes a las tres colecciones. Un borrador puede dejarlos vacíos.
+  const baseArticle = z.object({
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Solo minúsculas, números y guiones.")
+      .or(z.literal("")),
+    title: z.string().trim().max(120).default(""),
+    description: z.string().trim().max(240).default(""),
+    body: z.string().default(""),
+    author: z.string().trim().max(60).nullable().optional(),
+    tags: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
+    coverMediaId: z.number().int().positive().nullable().optional(),
+    coverAlt: z.string().trim().max(200).nullable().optional(),
+    status: z.enum(["draft", "published"]).default("draft"),
+    publishedAt: z.coerce.date().nullable().optional(),
+    featured: z.boolean().default(false),
+    seoTitle: z.string().trim().max(70).nullable().optional(),
+    seoDescription: z.string().trim().max(160).nullable().optional(),
+    ogMediaId: z.number().int().positive().nullable().optional(),
   });
 
-return articleSchema;
+  const reviewShape = baseArticle.extend({
+    kind: z.literal("review"),
+    gameId: z.number().int().positive().nullable().optional(),
+    score: z.number().int().min(1).max(10).nullable().optional(),
+    scoreReason: z.string().trim().max(2000).nullable().optional(),
+    verdict: z.string().trim().max(500).nullable().optional(),
+  });
+
+  const newsShape = baseArticle.extend({
+    kind: z.literal("news"),
+    category: z.string().trim().max(40).nullable().optional(),
+    sourceName: z.string().trim().max(120).nullable().optional(),
+    sourceUrl: z
+      .string()
+      .regex(/^https?:\/\//i, "La fuente debe empezar por http:// o https://.")
+      .nullable()
+      .optional(),
+  });
+
+  const guideShape = baseArticle.extend({ kind: z.literal("guide") });
+
+  const articleSchema = z
+    .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
+    .superRefine((value, ctx) => {
+      const publishing = value.status === "published";
+      if (!publishing) return;
+
+      if (value.title.trim().length < 3)
+        ctx.addIssue({ code: "custom", path: ["title"], message: "El título necesita al menos 3 caracteres." });
+      if (!value.slug)
+        ctx.addIssue({ code: "custom", path: ["slug"], message: "Una publicación necesita slug." });
+      if (value.body.trim().length < 10)
+        ctx.addIssue({ code: "custom", path: ["body"], message: "El cuerpo necesita al menos 10 caracteres." });
+      if (value.coverMediaId && !value.coverAlt?.trim())
+        ctx.addIssue({ code: "custom", path: ["coverAlt"], message: "La portada necesita texto alternativo." });
+      if (!value.publishedAt)
+        ctx.addIssue({ code: "custom", path: ["publishedAt"], message: "Una publicación necesita fecha." });
+
+      if (value.kind === "review") {
+        if (!value.gameId)
+          ctx.addIssue({ code: "custom", path: ["gameId"], message: "Elegí un juego." });
+        if (value.score == null)
+          ctx.addIssue({ code: "custom", path: ["score"], message: "Falta la puntuación." });
+        if (!value.scoreReason || value.scoreReason.trim().length < 20)
+          ctx.addIssue({ code: "custom", path: ["scoreReason"], message: "Justificá la puntuación (mínimo 20)." });
+        if (!value.verdict || value.verdict.trim().length < 10)
+          ctx.addIssue({ code: "custom", path: ["verdict"], message: "El veredicto necesita al menos 10 caracteres." });
+      }
+    });
+
+  return articleSchema;
 };
 
 export type ArticleInput = z.input<ReturnType<typeof makeArticleSchema>>;

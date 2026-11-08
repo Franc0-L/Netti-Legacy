@@ -136,7 +136,7 @@ async function updateArticle(args: {
   id: number;
   version: number;
   input: ArticleInput;
-}): Promise<ActionResult<{ version: number; slug: string; status: ContentStatus }>>;
+}): Promise<ActionResult<{ version: number; slug: string; status: ContentStatus; oldSlug?: string }>>;
 ```
 
 Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $version RETURNING version` + `INSERT` en `article_revisions`. Si no devuelve fila, hace un `SELECT` para distinguir:
@@ -146,6 +146,18 @@ Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $vers
 | No existe | `not_found` | — |
 | Versión desactualizada | `conflict` | `current` con el estado actual |
 | Slug ocupado | `conflict` | `fieldErrors.slug` |
+
+**Cambio de slug**: si `input.slug` difiere del slug actual, dentro de la misma transacción se inserta una redirección:
+
+```ts
+await tx.insert(redirects).values({
+  from_path: `/${kind}/${oldSlug}`,
+  to_path: `/${kind}/${input.slug}`,
+  status_code: 308,
+});
+```
+
+El código de estado es siempre `308`, nunca `301`, para que el navegador preserve el método y el cuerpo si es necesario. Si el `INSERT` en `redirects` falla (porque el destino ya existe), se captura y se trata como conflicto de slug.
 
 **Editar una entrada publicada**: guardar cambios **no la despublica**. Mantiene `status = 'published'` y revalida. Para sacarla del aire hay una acción explícita, `unpublishArticle`.
 
@@ -189,17 +201,28 @@ async function restoreArticle(args: {
 Dos detalles que un `catch (23505)` genérico no resuelve:
 
 1. **Identificar la restricción.** Solo se trata como conflicto de slug si el error corresponde a `articles_kind_slug_active`. Un `23505` de otra restricción es un error real y no debe convertirse en "elegí otro slug".
-2. **Reintentar hasta encontrar un sufijo libre.** `mi-articulo-2` también puede estar tomado. Se prueban `-2`, `-3`, … hasta un límite (10); si ninguno sirve, se devuelve `conflict` sin sugerencia.
+2. **Reintentar hasta encontrar un sufijo libre.** Se prueba primero el slug original. Si está ocupado, se prueban `-2`, `-3`, … hasta un límite (10); si ninguno sirve, se devuelve `conflict` sin sugerencia.
+
+Cada intento debe ejecutarse en una **transacción independiente** o usar un `SAVEPOINT` con rollback ante el conflicto. Si una violación de unicidad ocurre dentro de una transacción PostgreSQL, esa transacción queda abortada y no se puede continuar con otro `UPDATE` dentro de ella.
 
 ```ts
-for (let attempt = 2; attempt <= 11; attempt++) {
-  const candidate = attempt === 2 ? slug : `${slug}-${attempt}`;
+// Intento 1: slug original
+try {
+  return await restoreWithSlug(id, slug); // UPDATE ... RETURNING
+} catch (error) {
+  if (!isUniqueViolation(error, "articles_kind_slug_active")) throw error;
+}
+
+// Intento 2 a 10: sufijos -2 hasta -10
+for (let attempt = 2; attempt <= 10; attempt++) {
+  const candidate = `${slug}-${attempt}`;
   try {
-    return await restoreWithSlug(id, candidate); // UPDATE ... RETURNING
+    return await restoreWithSlug(id, candidate); // UPDATE ... RETURNING en transacción nueva o savepoint
   } catch (error) {
     if (!isUniqueViolation(error, "articles_kind_slug_active")) throw error;
   }
 }
+
 return { ok: false, code: "conflict", message: "No se pudo liberar el slug." };
 ```
 
@@ -349,7 +372,7 @@ Strict-Transport-Security: max-age=63072000; includeSubDomains
 Referrer-Policy: strict-origin-when-cross-origin
 X-Frame-Options: DENY
 Permissions-Policy: camera=(), microphone=(), geolocation=()
-Content-Security-Policy: default-src 'self'; img-src 'self' https://img.netti.example; ...
+Content-Security-Policy: default-src 'self'; img-src 'self' https://*.public.blob.vercel-storage.com; ...
 ```
 
 En `/admin/*` la CSP usa nonces y esas rutas se renderizan dinámicamente.
