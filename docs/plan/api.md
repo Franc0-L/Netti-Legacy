@@ -147,23 +147,13 @@ Ejecuta la transacción de §4.0: `UPDATE ... WHERE id = $id AND version = $vers
 | Versión desactualizada | `conflict` | `current` con el estado actual |
 | Slug ocupado | `conflict` | `fieldErrors.slug` |
 
-**Cambio de slug**: si `input.slug` difiere del slug actual, dentro de la misma transacción se inserta una redirección. Las rutas públicas usan prefijos por colección:
+**Cambio de slug**: si `input.slug` difiere del slug actual, dentro de la misma transacción se inserta una redirección. Las rutas públicas usan prefijos por colección (definidos en `lib/routes.ts`):
 
 ```ts
-const ARTICLE_ROUTE_PREFIX = {
-  review: "resenas",
-  news: "noticias",
-  guide: "guias",
-} as const;
+await tx
+  .deleteFrom(redirects)
+  .where(eq(redirects.from_path, articlePath(kind, input.slug)));
 
-export function articlePath(kind: ArticleKind, slug: string): string {
-  return `/${ARTICLE_ROUTE_PREFIX[kind]}/${slug}`;
-}
-```
-
-La transacción obtiene el slug anterior y el `kind` dentro de la misma operación (`SELECT ... FOR UPDATE` para evitar lecturas en falso), y luego inserta la redirección:
-
-```ts
 await tx.insert(redirects).values({
   from_path: articlePath(kind, oldSlug),
   to_path: articlePath(kind, input.slug),
@@ -171,9 +161,26 @@ await tx.insert(redirects).values({
 });
 ```
 
+La función `articlePath(kind, slug)` vive en `lib/routes.ts`, no en `app/actions/`, porque las funciones `"use server"` solo pueden exportar funciones async.
+
 El código de estado es siempre `308`, nunca `301`, para que el navegador preserve el método y el cuerpo si es necesario. Si el `INSERT` en `redirects` falla (porque el destino ya existe), se captura y se trata como conflicto de slug.
 
-**Editar una entrada publicada**: guardar cambios **no la despublica**. Mantiene `status = 'published'` y revalida. Para sacarla del aire hay una acción explícita, `unpublishArticle`.
+**Cambio de estado**: `updateArticle` no permite cambiar `status` ni `kind`. Si el `input.status` o `input.kind` difieren del actual, devuelve `conflict`. Para publicar usa `publishArticle`; para despublicar usa `unpublishArticle`; el `kind` se define al crear y no se modifica después.
+
+**Editar una entrada publicada**: guardar cambios **no la despublica**. Mantiene `status = 'published'` y revalida.
+
+### `publishArticle({ id, version })`
+
+`draft` → `published`. Valida completitud del contenido; si falta `publishedAt`, el servidor pone `now()`. Si `published_at` es futuro, queda programado.
+
+```ts
+async function publishArticle(args: {
+  id: number;
+  version: number;
+}): Promise<ActionResult<{ version: number; slug: string; status: "published" }>>;
+```
+
+Invalidación: `article:<kind>:<slug>`, `kind:<kind>`, `articles`, `home`.
 
 ### `unpublishArticle({ id, version })`
 
@@ -362,7 +369,7 @@ Son dos comprobaciones distintas y no intercambiables.
 
 `/api/health` devuelve `200` con `{ "ok": true }` y `Cache-Control: no-store`. Un health que consulta la base la despierta y consume CU-horas: eso es exactamente lo que este diseño evita.
 
-`/api/ready` no se expone al monitor público. Se llama a mano cuando algo falla, o desde un job de baja frecuencia que además registra el resultado. Devuelve `503` con el componente que falló:
+`/api/ready` no se expone al monitor público. Requiere `Authorization: Bearer $CRON_SECRET` y se llama a mano cuando algo falla, o desde un job de baja frecuencia que además registra el resultado. Devuelve `503` con el componente que falló:
 
 ```json
 { "ok": false, "db": "unreachable", "storage": "ok" }
@@ -386,7 +393,7 @@ Strict-Transport-Security: max-age=63072000; includeSubDomains
 Referrer-Policy: strict-origin-when-cross-origin
 X-Frame-Options: DENY
 Permissions-Policy: camera=(), microphone=(), geolocation=()
-Content-Security-Policy: default-src 'self'; img-src 'self' https://*.public.blob.vercel-storage.com; ...
+Content-Security-Policy: default-src 'self'; img-src 'self' https://<IMAGES_PUBLIC_BASE_URL_HOST>; ...
 ```
 
 En `/admin/*` la CSP usa nonces y esas rutas se renderizan dinámicamente.

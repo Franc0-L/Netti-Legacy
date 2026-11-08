@@ -124,11 +124,10 @@ begin
     raise exception 'La redirección crearía un ciclo.' using errcode = '23514';
   end if;
 
-  -- Evita el ciclo directo A→B / B→A
-  delete from redirects
-   where from_path = new.to_path and to_path = new.from_path;
   -- Colapsa cadenas: si X→A existía y ahora A→B, X pasa a apuntar a B.
   -- El filtro evita crear un auto-redirect al colapsar sobre la fila que se está insertando.
+  -- El ciclo directo A→B / B→A ya fue rechazado por el chequeo de ciclos arriba,
+  -- así que no hace falta un DELETE separado de la fila inversa.
   update redirects
      set to_path = new.to_path
    where to_path = new.from_path
@@ -165,7 +164,7 @@ create table games (
   updated_at       timestamptz not null default now(),
   version          integer not null default 1,
   constraint games_cover_alt_required
-    check ((cover_image_url is null and cover_media_id is null)
+    check (status <> 'published' or (cover_image_url is null and cover_media_id is null)
            or char_length(btrim(coalesce(cover_alt, ''))) > 0),
   constraint games_published_requires_cover
     check (status <> 'published' or cover_image_url is not null)
@@ -243,7 +242,7 @@ create table articles (
   constraint articles_source_url
     check (source_url is null or source_url ~* '^https?://'),
   constraint articles_cover_alt_required
-    check ((cover_image_url is null and cover_media_id is null)
+    check (status <> 'published' or (cover_image_url is null and cover_media_id is null)
            or char_length(btrim(coalesce(cover_alt, ''))) > 0),
 
   -- Estados
@@ -386,14 +385,15 @@ create table media (
 -- ON DELETE SET NULL, pero no en una sola sentencia.
 
 -- Evita reasignar un medio marcado para borrado (condición de carrera en mark-and-sweep).
--- Se dispara si el medio ya estaba marcado o si se va a marcar, y rechaza cualquier cambio
--- en sus asignaciones (article_id / game_id).
+-- Solo rechaza cambios en article_id / game_id cuando el medio ya está marcado.
+-- Cuando se borra el artículo primero (ON DELETE SET NULL pone article_id = NULL),
+-- el trigger no se dispara porque article_id no cambia en ese momento.
 create or replace function protect_media_during_purge()
 returns trigger
 language plpgsql
 as $$
 begin
-  if (old.pending_delete_at is not null or new.pending_delete_at is not null)
+  if old.pending_delete_at is not null
      and (new.article_id is distinct from old.article_id
           or new.game_id is distinct from old.game_id) then
     raise exception 'No se puede reasignar un medio marcado para eliminación.' using errcode = '23514';
@@ -406,11 +406,6 @@ create trigger media_protect_during_purge
   before update on media
   for each row
   execute function protect_media_during_purge();
-
--- Las asignaciones desde articles (cover_media_id, og_media_id) y games (cover_media_id)
--- deben consultar media dentro de la misma transacción y rechazar el medio si
--- media.pending_delete_at no es nulo. Este trigger no cubre esos puntos de asignación;
--- es responsabilidad de las acciones del servidor validarlo antes de escribir.
 
 create index media_pending_delete_idx
   on media (pending_delete_at)
@@ -473,7 +468,7 @@ Sin `media`, la purga de la papelera no sabe qué imágenes borrar y las subidas
 
 **Borrado consistente.** Postgres y Blob no comparten transacción, así que el orden importa:
 
-1. En una transacción: marcar `pending_delete_at` para los medios que ninguna otra entrada referencia y borrar la fila del artículo (las revisiones caen por `ON DELETE CASCADE`).
+1. En una transacción: recolectar los ids de medios que solo referencia este artículo, borrar la fila del artículo (la FK `ON DELETE SET NULL` libera `media.article_id` y `articles.cover_media_id`/`og_media_id`), y recién entonces marcar `pending_delete_at` en los medios huérfanos (las revisiones caen por `ON DELETE CASCADE`).
 2. Fuera de la transacción: borrar en Blob el objeto y sus variantes.
 3. Solo si Blob confirma: borrar las filas de `media` y `media_variants`.
 
@@ -559,26 +554,7 @@ Se consulta **solo cuando el artículo no existe**, con el mapa cacheado bajo el
 
 ## 3. Validación Zod
 
-Los esquemas viven en `lib/validation.ts`. **No se importan directamente en el cliente**: se construyen con una fábrica que recibe la URL pública de imágenes, porque `process.env` no existe en el navegador.
-
-```ts
-// lib/validation.ts
-export function imageUrlSchema(imagesBaseUrl: string) {
-  return z
-    .string()
-    .url("La portada debe ser una URL válida.")
-    .refine((value) => new URL(value).origin === new URL(imagesBaseUrl).origin, {
-      message: "La portada debe estar alojada en el almacenamiento de Netti.",
-    })
-    .refine((value) => !/\.svg$/i.test(new URL(value).pathname), {
-      message: "No se admiten SVG.",
-    })
-    .nullable()
-    .optional();
-}
-```
-
-Comparar `origin` y no `startsWith` evita que `https://img.netti.example.evil.com/x.png` pase la validación.
+Los esquemas viven en `lib/validation.ts`. **No se importan directamente en el cliente**: se construyen con una fábrica sin parámetros, porque las URLs de imágenes se resuelven en el servidor desde `media`, no se reciben desde el cliente.
 
 ### 3.1 Esquema de artículo
 
@@ -600,7 +576,12 @@ export const makeArticleSchema = () => {
     coverMediaId: z.number().int().positive().nullable().optional(),
     coverAlt: z.string().trim().max(200).nullable().optional(),
     status: z.enum(["draft", "published"]).default("draft"),
-    publishedAt: z.coerce.date().nullable().optional(),
+    publishedAt: z
+      .iso
+      .datetime({ offset: true })
+      .nullable()
+      .optional()
+      .transform((val) => (val ? new Date(val) : null)),
     featured: z.boolean().default(false),
     seoTitle: z.string().trim().max(70).nullable().optional(),
     seoDescription: z.string().trim().max(160).nullable().optional(),

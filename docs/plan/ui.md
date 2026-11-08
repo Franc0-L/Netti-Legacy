@@ -112,7 +112,7 @@ Se carga la entrada con su `version`. Al guardar se envía esa versión. Si otro
 
 Se elige una fecha futura y se publica. La entrada queda `published` con `published_at` futuro y no se ve hasta la hora. El job de revalidación la activa.
 
-La interfaz dice **"Se publica el 12/12 a las 09:00"** y no promete precisión al segundo: el job corre cada 30 minutos, así que el retraso máximo esperado es media hora. Si el job se atrasa, la entrada aparece igual en la siguiente ejecución; nunca se muestra antes de tiempo porque la consulta exige `published_at <= now()`.
+La interfaz dice **"Se publica el 12/12 a las 09:00"** y no promete precisión al segundo: el job de revalidación se ejecuta periódicamente (cada 30 minutos por defecto, pero GitHub Actions puede retrasar o descartar ejecuciones bajo carga). Si el job se atrasa, la entrada aparece igual en la siguiente ejecución exitosa; nunca se muestra antes de tiempo porque la consulta exige `published_at <= now()`.
 
 ### 7.6 Vista previa
 

@@ -11,7 +11,7 @@ Tecnologías, organización de las piezas y registro de decisiones. Revisado con
 | Base de datos | Neon (PostgreSQL serverless), plan Free |
 | Acceso a datos | Drizzle ORM sobre `pg` (node-postgres) |
 | Mutaciones | Server Actions |
-| Endpoints HTTP | Route Handlers solo para `upload`, `revalidate`, `health` y `ready` |
+| Endpoints HTTP | Route Handlers solo para `upload`, `revalidate`, `health` y `ready` (`rss.xml` y `sitemap.ts` son operativos de lectura, no mutaciones de negocio) |
 | Imágenes | Vercel Blob + `sharp` (variantes y re-encodeo) |
 | Markdown | `remark` + `remark-gfm` + `rehype` + `rehype-sanitize` |
 | Validación | Zod 4 |
@@ -51,8 +51,6 @@ Algunos sitios de terceros citan 0,5 GB y 50 CU-horas; la documentación oficial
 
 **El riesgo real**: al agotar las 100 CU-horas, Neon **suspende el cómputo hasta el mes siguiente**. No degrada: se cae. Con 0,25 CU de mínimo, 100 CU-horas equivalen a unas 400 horas despierto, o sea ~55 % del mes.
 
-**El riesgo real**: al agotar las 100 CU-horas, Neon **suspende el cómputo hasta el mes siguiente**. No degrada: se cae. Con 0,25 CU de mínimo, 100 CU-horas equivalen a unas 400 horas despierto, o sea ~55 % del mes.
-
 Por eso el diseño no puede permitirse que las visitas públicas despierten la base:
 
 1. Los artículos se prerenderizan. La lectura pública sale de caché o de ISR, no de Postgres.
@@ -70,11 +68,24 @@ Por eso el diseño no puede permitirse que las visitas públicas despierten la b
 
 ```ts
 // lib/content.ts
-export async function getArticle(kind, slug) {
+export async function getArticle(
+  kind: ArticleKind,
+  slug: string,
+): Promise<PublicArticle | null> {
   "use cache";
+
   cacheTag(`article:${kind}:${slug}`, `kind:${kind}`, "articles");
   cacheLife("max");
-  return db.query.articles.findFirst({ where: visibleArticle });
+
+  const now = new Date();
+
+  return db.query.articles.findFirst({
+    where: and(
+      eq(articles.kind, kind),
+      eq(articles.slug, slug),
+      visibleArticle(now),
+    ),
+  });
 }
 ```
 
@@ -271,7 +282,7 @@ netti/
 │   ├── markdown.ts
 │   ├── images.ts                  # sharp + variantes
 │   ├── storage.ts                 # put/delete (Blob)
-│   ├── validation.ts              # makeArticleSchema(baseUrl)
+│   ├── validation.ts              # makeArticleSchema()
 │   └── seo.ts                     # safeJsonLd, safeCdata
 ├── public/fonts/
 ├── proxy.ts
@@ -326,11 +337,12 @@ El resolver es común a todas las rutas de contenido. Una URL que cambia de cole
 
 ### 2.3 Escritura
 
-1. Server Action → `requireSession()` → verifica `Origin` → Zod → `articleSchema`.
-2. El servidor completa `published_at` si hace falta.
-3. Dentro de **una transacción**: `UPDATE ... WHERE id AND version RETURNING version` + `INSERT` del snapshot en `article_revisions`.
-4. Después del `COMMIT`: `updateTag` sobre los tags de `affectedTags()`.
-5. Devuelve `{ ok, version }` o `{ ok: false, errors, current? }`.
+1. Server Action → `requireSession()` → verifica `Origin`.
+2. El servidor completa `published_at` si hace falta (antes de validar con Zod).
+3. Zod → `articleSchema`.
+4. Dentro de **una transacción**: `UPDATE ... WHERE id AND version RETURNING version` + `INSERT` del snapshot en `article_revisions`.
+5. Después del `COMMIT`: `updateTag` sobre los tags de `affectedTags()`.
+6. Devuelve `{ ok, version }` o `{ ok: false, errors, current? }`.
 
 Invalidar antes de confirmar publica un estado que todavía puede revertirse.
 
@@ -384,7 +396,7 @@ export function safeCdata(value: string): string;
 **`lib/validation.ts`**:
 
 ```ts
-export const makeArticleSchema = (imagesBaseUrl: string) => {
+export const makeArticleSchema = () => {
   // ... construcción del discriminatedUnion ...
   return articleSchema;
 };
@@ -392,6 +404,11 @@ export const makeArticleSchema = (imagesBaseUrl: string) => {
 export type ArticleInput = z.input<ReturnType<typeof makeArticleSchema>>;
 export type ParsedArticle = z.output<ReturnType<typeof makeArticleSchema>>;
 export function isUniqueViolation(error: unknown, constraintName: string): boolean;
+```
+
+**`lib/auth.ts`**:
+
+```ts
 export async function requireSession(): Promise<Session>;
 export function assertSameOrigin(origin?: string): void;
 ```

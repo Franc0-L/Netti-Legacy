@@ -33,7 +33,6 @@ npm run build
 |------------|----------|-------|
 | Base de datos | Neon Free | $0 |
 | Imágenes | Vercel Blob | $0 en Hobby dentro de los límites |
-| Dominio de imágenes | Dominio propio en Cloudflare | **~USD 10/año** |
 | Hosting | Vercel Hobby | $0, solo uso no comercial |
 | CI | GitHub Actions | $0 en repo público |
 | Monitoreo | Servicio de uptime + tracker de errores | $0 en planes gratuitos |
