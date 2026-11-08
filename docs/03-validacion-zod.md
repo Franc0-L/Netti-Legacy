@@ -22,7 +22,7 @@ export const makeArticleSchema = () => {
     description: z.string().trim().max(240).default(""),
     body: z.string().default(""),
     author: z.string().trim().max(60).nullable().optional(),
-    tags: z.array(z.string().trim().min(1).max(30)).max(5).default([]),
+    tags: z.array(z.string().trim().min(1).max(30).transform((val) => val.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, ''))).max(5).default([]),
     coverMediaId: z.number().int().positive().nullable().optional(),
     coverAlt: z.string().trim().max(200).nullable().optional(),
     status: z.enum(["draft", "published"]).default("draft"),
@@ -100,7 +100,7 @@ export type ParsedArticle = z.output<ReturnType<typeof makeArticleSchema>>;
 
 El `kind` es un literal por variante, así que `discriminatedUnion` estrecha el tipo: en `value.kind === "review"`, `gameId` y `score` existen en el tipo. Los campos de reseña son nullable para que un borrador incompleto sea válido; la exigencia aparece al publicar, en el mismo lugar que los `CHECK` de la base.
 
-**Pendiente:** `makeGameSchema` para el CRUD de fichas de juegos (slug, portada, estado, plataformas, géneros). Se define antes de crear ese CRUD; no bloquea el MVP de reseñas.
+
 
 `sourceUrl` usa la misma regla que el `CHECK` (`~*`), insensible a mayúsculas. Si Zod fuera más laxo, `HTTPS://x` pasaría la validación y fallaría en la base con un `500`.
 

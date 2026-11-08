@@ -2,39 +2,7 @@
 
 ## 1. Contrato de almacenamiento (`lib/storage.ts`)
 
-```ts
-export interface StoredObject {
-  key: string;          // articles/<uuid>.webp, nunca slug ni nombre original
-  url: string;          // pública, derivada de la respuesta de Blob
-  bytes: number;
-}
-
-export interface Storage {
-  put(
-    key: string,
-    body: ReadableStream | Blob | ArrayBuffer,
-    options: {
-      contentType: string;
-      cacheControlMaxAge: number;
-    },
-  ): Promise<StoredObject>;
-  del(keys: string[]): Promise<void>;
-  list(args: {
-    prefix: string;
-    cursor?: string;
-    limit?: number;
-  }): Promise<{
-    objects: Array<{ key: string; bytes: number; uploadedAt: Date }>;
-    nextCursor: string | null;
-  }>;
-}
-```
-
-(`@vercel/blob` expone `list` con `prefix` y `cursor`; confirmar en Fase 0 si `list` cuenta como operación avanzada.)
-
-- `put` usa claves exactas (`addRandomSuffix: false`) para que el `key` sea estable y el `url` predecible.
-- `del` es idempotente; si falla alguna variante, se registra en `storage_orphans` para reconciliación posterior.
-- Credenciales: OIDC en Vercel (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`), `BLOB_READ_WRITE_TOKEN` en desarrollo local y CI.
+La definición completa de `Storage` vive en `01.2.1-stack-caché-modelo.md` (§2.5). Incluye `put`, `del` y `list`. `@vercel/blob` expone `list` con `prefix` y `cursor`; confirmar en Fase 0 si `list` cuenta como operación avanzada.
 
 ## 2. Metadatos de imágenes — segundo paso
 
@@ -79,7 +47,7 @@ Los documentos dicen que un job compara `media.storage_key` con el store y repor
 5. **Subidas abandonadas**: `media` de más de 7 días sin referencias → marcar `pending_delete_at`.
 6. `last_success_at` solo si 1–5 terminaron sin excepción. Correrlo dentro del workflow del backup nocturno (misma despertada de Neon).
 
-## 3. Cursor del cron (`POST /api/revalidate`)
+## 4. Cursor del cron (`POST /api/revalidate`)
 
 ```
 0. Bearer con timingSafeEqual → 401
@@ -94,6 +62,4 @@ Los documentos dicen que un job compara `media.storage_key` con el store y repor
 8. return { revalidated, cursor }
 ```
 
-- **No hace falta lock.** Dos ejecuciones solapadas revalidan dos veces; es idempotente. No usar `pg_try_advisory_lock` de sesión: el pooler de Neon (modo transacción) lo rompe; solo `xact` es seguro.
-- **`expire: 0`, no `"max"`.** Con `"max"` el primer visitante tras la hora todavía ve el 404 de antes (stale-while-revalidate).
-- Una entrada despublicada o a papelera entre medio queda fuera por el filtro de `status`.
+No hace falta lock: dos ejecuciones solapadas revalidan dos veces y es idempotente. No uses `pg_try_advisory_lock` de sesión: el pooler de Neon (modo transacción) lo rompe; solo `xact` es seguro.
