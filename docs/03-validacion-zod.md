@@ -62,6 +62,9 @@ export const makeArticleSchema = () => {
   const articleSchema = z
     .discriminatedUnion("kind", [reviewShape, newsShape, guideShape])
     .superRefine((value, ctx) => {
+      if (value.coverMediaId && !value.coverAlt?.trim())
+        ctx.addIssue({ code: "custom", path: ["coverAlt"], message: "La portada necesita texto alternativo." });
+
       const publishing = value.status === "published";
       if (!publishing) return;
 
@@ -71,8 +74,6 @@ export const makeArticleSchema = () => {
         ctx.addIssue({ code: "custom", path: ["slug"], message: "Una publicación necesita slug." });
       if (value.body.trim().length < 10)
         ctx.addIssue({ code: "custom", path: ["body"], message: "El cuerpo necesita al menos 10 caracteres." });
-      if (value.coverMediaId && !value.coverAlt?.trim())
-        ctx.addIssue({ code: "custom", path: ["coverAlt"], message: "La portada necesita texto alternativo." });
       if (!value.publishedAt)
         ctx.addIssue({ code: "custom", path: ["publishedAt"], message: "Una publicación necesita fecha." });
 
