@@ -34,22 +34,24 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 ```
 0. Bearer con timingSafeEqual → 401
 1. ahora = reloj de la aplicación (Date.now() del entorno serverless, sin Neon)
-2. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
+2. sync_pendiente = leer de cron_runs pending_next_due_sync para job_name = 'revalidate_scheduled'
+   si sync_pendiente es true → ignorar next_due, ir al paso 3 (consultar Neon directamente)
+3. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
    si next_due es null o next_due > ahora → retornar { revalidado: 0, cursor: ahora }
    (no hay nada que activar aún; no se toca Postgres)
-3. t0 = select now()  -- reloj de la base, solo si el almacén barato indica trabajo pendiente
-4. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
-5. update cron_runs set last_run_at = t0
-6. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
+4. t0 = select now()  -- reloj de la base, solo si el almacén barato indica trabajo pendiente
+5. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
+6. update cron_runs set last_run_at = t0
+7. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
        order by published_at, id limit 200    -- usa articles_pending_activation_idx
-7. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
-8. si due.length == 200 → seguir procesando lotes siguientes sin esperar al próximo intervalo
+8. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
+9. si due.length == 200 → seguir procesando lotes siguientes sin esperar al próximo intervalo
    (iterar con cur = (published_at, id) de la última fila procesada hasta que due.length < 200)
-9. cursor = (due.length == 200) ? (published_at, id) de la última del último lote : (t0, 0)
-10. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
-11. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
-12. limpiar pending_next_due_sync si está seteada
-13. return { revalidado, cursor }
+10. cursor = (due.length == 200) ? (published_at, id) de la última del último lote : (t0, 0)
+11. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
+12. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
+13. limpiar pending_next_due_sync si estaba seteada
+14. return { revalidado, cursor }
 ```
 
 **Fallo de sincronización de `next_due`**: si el write al almacén barato falla, la marca `pending_next_due_sync` queda seteada en `cron_runs`. El cron, al detectarla, ignora `next_due` y consulta Neon directamente como fallback. La marca se limpia solo tras un write exitoso al almacén barato.
