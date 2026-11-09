@@ -16,7 +16,7 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 
 **Algoritmo `reconcileStorage()`**, un endpoint protegido con `CRON_SECRET`, acotado en tiempo y reanudable:
 
-0. **Freno de seguridad**: contar cuántas filas se borrarían en el store. Si supera el 10 % de las claves totales o si la base fue restaurada hace menos de 7 días (detectado por `cron_runs.last_success_at` antiguo vs `now()`), abortar y alertar. Nunca borrar masivamente tras un restore de backup.
+0. **Freno de seguridad**: contar cuántas filas se borrarían en el store. Si supera el 10 % de las claves totales, abortar y alertar. Independientemente, si existe una marca `backup_restored_at` en `cron_runs` con fecha menor a 7 días, abortar y alertar. Nunca borrar masivamente tras un restore de backup.
 1. **Purga de sesiones y intentos de login**: borrar `sessions` con `expires_at < now()` o `absolute_expires_at < now()`, y `login_attempts` con más de 7 días. Dueño del job: `reconcileStorage`, frecuencia semanal.
 2. **Sweep de marcados**: `media` con `pending_delete_at < now() - 24 h`. Re-verificar referencias con regex con borde (`media:1` no debe matchear `media:12`). Si hay referencia, limpiar la marca. Si no, `storage.del(clave + variantes)`; y solo si Blob confirma, borrar las filas. Si falla, registrar en `storage_orphans (action='del', pending)` y dejar la marca.
 3. **Huérfanos en el store**: `list` de `articles/` y `games/` contra `media.storage_key ∪ media_variants.storage_key`. Borrar lo que no está en DB **y** tenga `uploadedAt < now() - 1 h` (para no pisar subidas en curso); registrarlo como `repaired`.
@@ -39,7 +39,7 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 1. t0  = select now()                          -- reloj de la base
 2. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
 3. update cron_runs set last_run_at = t0
-4. due = articles where status='published' and (published_at, id) > cur
+4. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
          order by published_at, id limit 200    -- usa articles_pending_activation_idx
 5. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
 6. cursor = (due.length == 200) ? (published_at, id) de la última : (t0, 0)
@@ -47,6 +47,8 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 8. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
 9. return { revalidated, cursor }
 ```
+
+**Señal de restauración de backup**: una operación de restore de backup escrita en Postgres registra `backup_restored_at = now()` en una fila de control (por ejemplo, en `cron_runs` con `job_name = 'backup_restore'`). El paso 0 del freno de seguridad comprueba esa marca: si `backup_restored_at > now() - 7 días`, aborta la reconciliación. Esto es independiente de `last_success_at`, que solo refleja cuándo corrió el cron por última vez.
 
 El cursor usa la tupla `(published_at, id)` para no omitir filas cuando varias comparten el mismo `published_at` en el borde del lote.
 
