@@ -33,7 +33,7 @@ Blog editorial de videojuegos en español, de un solo autor, con reseñas (puntu
 4. Para escribir Server Actions o endpoints: `04.1-api-acciones-contenido.md`.
 5. Para construir interfaz: `05-ui-flujo.md`.
 6. Para configurar el repo y desplegar: `06.1-operaciones-entorno.md`.
-7. Para empezar a programar: `06.1-operaciones-entorno.md`, **Fase 0**.
+7. Para empezar a programar: `06.2-operaciones-backup-hoja.md`, **Fase 0**.
 
 ## Reglas
 
@@ -73,4 +73,4 @@ Cada afirmación de infraestructura lleva su grado de certeza. Sin esto, una hip
 
 Documentación revisada contra las versiones de noviembre de 2026 y contra varias revisiones arquitectónicas independientes. No hay código todavía.
 
-**Próximo paso**: Fase 0 de `06.1-operaciones-entorno.md`. Es un spike de tres días para medir consumo de Neon, invalidación de caché, `scrypt`, subida real a Blob y backup restaurado, antes de escribir el panel. Si esos números no cierran, se corrige el diseño con evidencia y no se sigue documentando.
+**Próximo paso**: Fase 0 de `06.2-operaciones-backup-hoja.md`. Es un spike de 2–3 días para medir consumo de Neon, invalidación de caché, `scrypt`, subida real a Blob y backup restaurado, antes de escribir el panel. Si esos números no cierran, se corrige el diseño con evidencia y no se sigue documentando.
