@@ -45,13 +45,15 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 7. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
 8. si due.length == 200 → continuar iterando con cur = (published_at, id) de la última fila procesada
    hasta que due.length < 200 o se alcance el presupuesto de tiempo
-9. cursor = (published_at, id) de la última fila del último lote procesado : (t0, 0)
-10. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo tras validar todos los tags de todos los lotes
+9. cursor = (published_at, id) de la última fila del lote que acaba de procesarse
+10. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- tras cada lote, no solo al final
 11. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
 12. return { revalidado, cursor }
 ```
 
-**Nota sobre `pending_next_due_sync`**: esta marca se leía de `cron_runs` en Postgres, lo que implicaba una consulta a Neon en cada ejecución del cron. La opción documentada escribe `next_due` en el almacén barato antes del `COMMIT` de cada acción de publicación, de modo que el cron nunca necesite leer `cron_runs` para decidir si hay trabajo. Si el write al almacén barato falla, el cron corre de más, no de menos, y consulta Neon directamente como fallback seguro.
+**Nota sobre `next_due`**: cada acción de publicación escribe `next_due` en el almacén barato antes del `COMMIT`. Si el write falla, el cron corre de más, no de menos, y consulta Neon directamente como fallback seguro.
+
+**Señal de restauración de backup**: una operación de restore de backup escrita en Postgres registra `backup_restored_at = now()` en la fila de `cron_runs` con `job_name = 'backup_restore'` inmediatamente después de terminar la restauración y antes de habilitar la reconciliación. El freno de seguridad del paso 0 comprueba: si `backup_restored_at > ahora - 7 días`, aborta la reconciliación.
 
 **Si el almacén barato no está disponible**: el cron consulta Neon directamente como fallback, sin usar `next_due`.
 

@@ -12,7 +12,7 @@ Plan de reconstrucción de Netti. Es la referencia para cualquier persona o agen
 | `01.2.2-stack-imagenes-auth.md` | Imágenes (Vercel Blob), auth, Markdown, seguridad, decisiones D-001 a D-022 |
 | `02.1-modelo-tablas.md` | Esquema SQL: tipos, juegos, articles |
 | `02.2.1-modelo-busqueda-media.md` | Búsqueda FTS, media, article_revisions |
-| `02.2.2-modelo-sesiones-zod.md` | sessions, login_attempts, redirects, storage_orphans, cron_runs, Zod schemas |
+| `02.2.2-modelo-sesiones-zod.md` | sessions, login_attempts, redirects, storage_orphans, cron_runs (esquemas SQL) |
 | `03-validacion-zod.md` | makeArticleSchema, makeGameSchema, makeMediaMetadataSchema |
 | `04.1-api-acciones-contenido.md` | Server Actions: auth, create/update/publish/trash/restore/purge |
 | `04.2-api-endpoints-cabeceras.md` | Route Handlers (upload/revalidate/health/ready), cabeceras |
