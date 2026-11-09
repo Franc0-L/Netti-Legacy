@@ -33,19 +33,19 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 
 ```
 0. Bearer con timingSafeEqual → 401
-0.5. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
-     si next_due es null o next_due > t0 → retornar { revalidated: 0, cursor: t0 }
-     (no hay nada que activar aún; no se toca Postgres)
 1. t0  = select now()                          -- reloj de la base
-2. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
-3. update cron_runs set last_run_at = t0
-4. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
+2. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
+     si next_due es null o next_due > t0 → retornar { revalidated: 0, cursor: t0 }
+     (no hay nada que activar aún; no se toca Postgres después de este punto)
+3. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
+4. update cron_runs set last_run_at = t0
+5. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
          order by published_at, id limit 200    -- usa articles_pending_activation_idx
-5. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
-6. cursor = (due.length == 200) ? (published_at, id) de la última : (t0, 0)
-7. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
-8. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
-9. return { revalidated, cursor }
+6. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
+7. cursor = (due.length == 200) ? (published_at, id) de la última : (t0, 0)
+8. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
+9. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
+10. return { revalidated, cursor }
 ```
 
 **Señal de restauración de backup**: una operación de restore de backup escrita en Postgres registra `backup_restored_at = now()` en una fila de control (por ejemplo, en `cron_runs` con `job_name = 'backup_restore'`). El paso 0 del freno de seguridad comprueba esa marca: si `backup_restored_at > now() - 7 días`, aborta la reconciliación. Esto es independiente de `last_success_at`, que solo refleja cuándo corrió el cron por última vez.
