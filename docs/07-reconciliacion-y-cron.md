@@ -27,28 +27,36 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 
 ## 4. Cursor del cron (`POST /api/revalidate`)
 
-**Mitigación de CU-horas**: cada ejecución despierta Neon. Para evitar 48 despertares al día (~30 CU-h/mes solo en cómputo de arranque), el endpoint primero consulta un almacén barato (Edge Config de Vercel o un JSON en Blob) que guarde el próximo `published_at` pendiente. Si ese almacén dice que no hay nada por activar antes de `t0`, el endpoint retorna sin tocar Postgres. Solo cuando el almacén barato indica una fecha próxima, se consulta Neon.
+**Mitigación de CU-horas**: cada ejecución despierta Neon. Para evitar 48 despertares al día (~30 CU-h/mes solo en cómputo de arranque), el endpoint usa un reloj de aplicación (disponible sin consultar Neon) para decidir si hay trabajo, y solo consulta Neon cuando el almacén barato indica que corresponde revisar publicaciones.
 
-**Alimentación de `next_due`**: cada acción que cambie la visibilidad de un artículo (`publishArticle`, `unpublishArticle`, `trashArticle`, `restoreArticle`, `updateArticle` si cambia `published_at`) recalcula `next_due` tras el `COMMIT` y lo escribe en el almacén barato. Así el cron nunca sale con `next_due = null` cuando hay artículos pendientes de activar.
+**Alimentación de `next_due`**: cada acción que cambie la visibilidad de un artículo (`createArticle`, `publishArticle`, `unpublishArticle`, `trashArticle`, `restoreArticle`, `updateArticle` si cambia `published_at` o elimina un artículo programado) recalcula `next_due` tras el `COMMIT` y lo escribe en el almacén barato. Además, persiste una marca `pending_next_due_sync` en `cron_runs` antes de escribir al almacén barato, y la limpia una vez confirmado el write. Si el write al almacén barato falla o el almacén no está disponible, el cron ignora `next_due` y consulta Neon directamente como fallback seguro.
 
 ```
 0. Bearer con timingSafeEqual → 401
-1. t0  = select now()                          -- reloj de la base
+1. ahora = reloj de la aplicación (Date.now() del entorno serverless, sin Neon)
 2. next_due = leer de Edge Config / Blob JSON (almacén barato, sin Neon)
-     si next_due es null o next_due > t0 → retornar { revalidated: 0, cursor: t0 }
-     (no hay nada que activar aún; no se toca Postgres después de este punto)
-3. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
-4. update cron_runs set last_run_at = t0
-5. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
-         order by published_at, id limit 200    -- usa articles_pending_activation_idx
-6. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
-7. cursor = (due.length == 200) ? (published_at, id) de la última : (t0, 0)
-8. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
-9. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
-10. return { revalidated, cursor }
+   si next_due es null o next_due > ahora → retornar { revalidado: 0, cursor: ahora }
+   (no hay nada que activar aún; no se toca Postgres)
+3. t0 = select now()  -- reloj de la base, solo si el almacén barato indica trabajo pendiente
+4. cur = (cron_runs.last_published_at, cron_runs.last_id) ?? (t0 - 24 h, 0)
+5. update cron_runs set last_run_at = t0
+6. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
+       order by published_at, id limit 200    -- usa articles_pending_activation_idx
+7. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
+8. si due.length == 200 → seguir procesando lotes siguientes sin esperar al próximo intervalo
+   (iterar con cur = (published_at, id) de la última fila procesada hasta que due.length < 200)
+9. cursor = (due.length == 200) ? (published_at, id) de la última del último lote : (t0, 0)
+10. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
+11. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
+12. limpiar pending_next_due_sync si está seteada
+13. return { revalidado, cursor }
 ```
 
-**Señal de restauración de backup**: una operación de restore de backup escrita en Postgres registra `backup_restored_at = now()` en una fila de control (por ejemplo, en `cron_runs` con `job_name = 'backup_restore'`). El paso 0 del freno de seguridad comprueba esa marca: si `backup_restored_at > now() - 7 días`, aborta la reconciliación. Esto es independiente de `last_success_at`, que solo refleja cuándo corrió el cron por última vez.
+**Fallo de sincronización de `next_due`**: si el write al almacén barato falla, la marca `pending_next_due_sync` queda seteada en `cron_runs`. El cron, al detectarla, ignora `next_due` y consulta Neon directamente como fallback. La marca se limpia solo tras un write exitoso al almacén barato.
+
+**Si el almacén barato no está disponible**: el cron consulta Neon directamente como fallback, sin usar `next_due`.
+
+**Señal de restauración de backup**: una operación de restore de backup escrita en Postgres registra `backup_restored_at = now()` en una fila de control (por ejemplo, en `cron_runs` con `job_name = 'backup_restore'`). El procedimiento de restauración debe escribir esta marca **después** de terminar la restauración y **antes** de habilitar la reconciliación. El freno de seguridad del paso 0 comprueba: si `backup_restored_at > ahora - 7 días`, aborta la reconciliación. Esto es independiente de `last_success_at`, que solo refleja cuándo corrió el cron por última vez.
 
 El cursor usa la tupla `(published_at, id)` para no omitir filas cuando varias comparten el mismo `published_at` en el borde del lote.
 

@@ -32,7 +32,7 @@ Quicksand auto-hospedada (`public/fonts/`), pesos 300–700. Cuerpo de artículo
 - Header: "Netti." + Reseñas, Noticias, Guías, Juegos, Buscar.
 - Inicio: destacado, últimos por colección, estadísticas cacheadas, "Juego al azar" (cacheado, nunca consulta la base por visita). **Nota:** no puede usar `cacheLife('max')` indefinidamente o siempre devolvería el mismo juego; usar invalidación periódica o elegirlo en el cliente.
 - Detalle: título, meta, cuerpo, etiquetas, puntuación, relacionados.
-- 404 real; si el slug no existe se consulta `redirects` y se responde 308.
+- 404 real; si el slug no existe, se consulta el índice de `redirects` cacheado y se responde 308 si existe redirección; si no, 404.
 
 ## 4. Panel (pantalla completa)
 
