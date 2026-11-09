@@ -45,16 +45,16 @@ La acción rechaza con `conflict` si `pending_delete_at` no es nulo. Después in
 7. due = articles where status='published' and published_at <= t0 and (published_at, id) > cur
        order by published_at, id limit 200    -- usa articles_pending_activation_idx
 8. por fila: affectedTags(null, estado(fila)) → revalidateTag(tag, { expire: 0 })
-9. si due.length == 200 → seguir procesando lotes siguientes sin esperar al próximo intervalo
-   (iterar con cur = (published_at, id) de la última fila procesada hasta que due.length < 200)
-10. cursor = (due.length == 200) ? (published_at, id) de la última del último lote : (t0, 0)
-11. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo acá, nunca antes
+9. si due.length == 200 → continuar iterando con cur = (published_at, id) de la última fila procesada
+   hasta que due.length < 200 o se alcance el presupuesto de tiempo
+10. cursor = (published_at, id) de la última fila del último lote procesado : (t0, 0)
+11. update cron_runs set last_published_at = cursor[0], last_id = cursor[1]   -- solo tras validar todos los tags de todos los lotes
 12. escribir next_due en Edge Config / Blob JSON (próximo published_at pendiente o null)
 13. limpiar pending_next_due_sync si estaba seteada
 14. return { revalidado, cursor }
 ```
 
-**Fallo de sincronización de `next_due`**: si el write al almacén barato falla, la marca `pending_next_due_sync` queda seteada en `cron_runs`. El cron, al detectarla, ignora `next_due` y consulta Neon directamente como fallback. La marca se limpia solo tras un write exitoso al almacén barato.
+**Nota sobre el costo de `pending_next_due_sync`**: esta marca se lee de `cron_runs` en Postgres, lo que implica una consulta mínima a Neon en cada ejecución del cron (una vez cada 30 minutos). Es el precio de tener un fallback duradero cuando el almacén barato no está disponible o falló. Si se quiere evitar completamente este despertar, la marca puede almacenarse también en Edge Config / Blob JSON junto con `next_due`, pero eso duplica el estado y añade complejidad de consistencia. La opción documentada acepta el costo de una consulta ligera a Neon por ejecución del cron.
 
 **Si el almacén barato no está disponible**: el cron consulta Neon directamente como fallback, sin usar `next_due`.
 
